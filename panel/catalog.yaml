@@ -1,0 +1,187 @@
+# Declarative discovery catalog — extend without code when possible.
+# Each family must have a fetch implementation registered in panel.providers
+# (or a plugin that calls register_provider).
+
+version: 1
+
+families:
+  claude:
+    label: Claude
+    color: "#FF9830"
+    color_rgb: "200;170;100"
+    home_prefixes: [".claude"]
+    credential_files: [".credentials.json"]
+    env_keys: []
+    notes: "Anthropic subscription OAuth (Claude Code)"
+
+  codex:
+    label: Codex
+    color: "#B877D9"
+    color_rgb: "175;130;190"
+    home_prefixes: [".codex"]
+    credential_files: ["auth.json"]
+    env_keys: []
+    notes: "ChatGPT / Codex plan windows"
+
+  grok:
+    label: Grok
+    color: "#73BF69"
+    color_rgb: "100;185;185"
+    home_prefixes: [".grok"]
+    credential_files: ["auth.json"]
+    env_keys: []
+    notes: "SuperGrok pool via GetGrokCreditsConfig"
+
+  gemini:
+    label: Gemini
+    color: "#4285F4"
+    color_rgb: "66;133;244"
+    home_prefixes: [".gemini"]
+    credential_files: ["oauth_creds.json", "google_accounts.json", "credentials.json", "auth.json"]
+    soft_files: ["GEMINI.md"]
+    env_keys: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"]
+    notes: "Gemini CLI / Code Assist"
+
+  kimi:
+    label: Kimi
+    color: "#00C2A8"
+    color_rgb: "0;194;168"
+    home_prefixes: [".kimi", ".kimi-code"]
+    credential_files: ["credentials/kimi-code.json", "kimi-code.json", "auth.json", "credentials.json"]
+    soft_files: ["kimi.json"]
+    env_keys: ["KIMI_API_KEY", "MOONSHOT_API_KEY"]
+    notes: "Moonshot / Kimi coding"
+
+  openrouter:
+    label: OpenRouter
+    color: "#A78BFA"
+    color_rgb: "167;139;250"
+    home_prefixes: [".openrouter"]
+    credential_files: ["key", "api_key", "auth.json", "credentials.json"]
+    env_keys: ["OPENROUTER_API_KEY"]
+    notes: "Key credit / limit remaining"
+
+  openai:
+    label: OpenAI
+    color: "#10A37F"
+    color_rgb: "16;163;127"
+    home_prefixes: [".openai"]
+    credential_files: ["key", "api_key", "auth.json"]
+    env_keys: ["OPENAI_API_KEY"]
+    notes: "API key probe; ChatGPT plan is codex"
+
+  github:
+    label: GitHub
+    color: "#8B949E"
+    color_rgb: "139;148;158"
+    home_prefixes: [".github-sup", ".github"]
+    credential_files: ["token", "github_token", ".token"]
+    env_keys: ["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PAT"]
+    gh_hosts: true
+    notes: "REST rate limit (not Copilot premium)"
+
+  # Stubs: discovered when home/env present; need plugin fetch or will report unknown family until registered
+  cursor:
+    label: Cursor
+    color: "#7C3AED"
+    color_rgb: "124;58;237"
+    home_prefixes: [".cursor"]
+    credential_files: ["auth.json", "credentials.json"]
+    soft_files: ["argv.json"]
+    env_keys: ["CURSOR_API_KEY"]
+    optional_fetcher: true
+    notes: "Install cursor provider plugin or contribute fetch_cursor"
+
+  copilot:
+    label: Copilot
+    color: "#24292F"
+    color_rgb: "36;41;47"
+    home_prefixes: [".copilot", ".config/github-copilot"]
+    credential_files: ["apps.json", "hosts.json", "config.json"]
+    env_keys: ["COPILOT_TOKEN", "GH_TOKEN"]
+    optional_fetcher: true
+    notes: "Premium quota often undocumented; stub until plugin"
+
+  amp:
+    label: Amp
+    color: "#F59E0B"
+    color_rgb: "245;158;11"
+    home_prefixes: [".amp"]
+    credential_files: ["auth.json", "credentials.json"]
+    env_keys: ["AMP_API_KEY"]
+    optional_fetcher: true
+
+  opencode:
+    label: OpenCode
+    color: "#06B6D4"
+    color_rgb: "6;182;212"
+    home_prefixes: [".opencode", ".config/opencode"]
+    credential_files: ["auth.json", "credentials.json"]
+    env_keys: ["OPENCODE_API_KEY"]
+    optional_fetcher: true
+
+  zai:
+    label: z.ai
+    color: "#EC4899"
+    color_rgb: "236;72;153"
+    home_prefixes: [".zai", ".z-ai"]
+    credential_files: ["auth.json", "credentials.json", "api_key"]
+    env_keys: ["ZAI_API_KEY", "Z_AI_API_KEY"]
+    optional_fetcher: true
+
+  minimax:
+    label: MiniMax
+    color: "#EF4444"
+    color_rgb: "239;68;68"
+    home_prefixes: [".minimax"]
+    credential_files: ["auth.json", "credentials.json", "api_key"]
+    env_keys: ["MINIMAX_API_KEY"]
+    optional_fetcher: true
+
+  windsurf:
+    label: Windsurf
+    color: "#0EA5E9"
+    color_rgb: "14;165;233"
+    home_prefixes: [".windsurf", ".codeium"]
+    credential_files: ["auth.json", "credentials.json"]
+    env_keys: ["WINDSURF_API_KEY", "CODEIUM_API_KEY"]
+    optional_fetcher: true
+
+  continue:
+    label: Continue
+    color: "#22C55E"
+    color_rgb: "34;197;94"
+    home_prefixes: [".continue"]
+    credential_files: ["config.json", "credentials.json"]
+    env_keys: []
+    optional_fetcher: true
+
+  aider:
+    label: Aider
+    color: "#A3E635"
+    color_rgb: "163;230;53"
+    home_prefixes: [".aider"]
+    credential_files: [".env", "config.yml"]
+    env_keys: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+    optional_fetcher: true
+
+  litellm:
+    label: LiteLLM
+    color: "#6366F1"
+    color_rgb: "99;102;241"
+    home_prefixes: [".litellm"]
+    credential_files: ["config.yaml", "key"]
+    env_keys: ["LITELLM_API_KEY", "LITELLM_MASTER_KEY"]
+    optional_fetcher: true
+
+  anthropic_api:
+    label: Anthropic API
+    color: "#D97706"
+    color_rgb: "217;119;6"
+    home_prefixes: [".anthropic"]
+    credential_files: ["key", "api_key"]
+    env_keys: ["ANTHROPIC_API_KEY"]
+    optional_fetcher: true
+    notes: "API key product; Claude sub is family=claude"
+
+skip_home_name_regex: "(cold_archive|archive|bak|backup|tmp|temp|personal-personal|Cache|cache)"

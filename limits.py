@@ -79,6 +79,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="exit 1=warn 2=critical 3=no live (for CI/hooks)",
     )
+    p.add_argument(
+        "--family",
+        action="append",
+        default=None,
+        help="only these families (repeatable), e.g. --family codex --family grok",
+    )
+    p.add_argument(
+        "--profile",
+        action="append",
+        default=None,
+        help="only these profile ids/labels (repeatable)",
+    )
+    p.add_argument(
+        "--only-live",
+        action="store_true",
+        help="hide offline/auth profiles in terminal/HTML snapshot",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="parallel fetch workers (default 16, max 64)",
+    )
     return p.parse_args(argv)
 
 
@@ -153,13 +176,42 @@ def main(argv: list[str] | None = None) -> int:
         cfg.interval = max(15, args.interval)
     if args.theme:
         cfg.theme = args.theme
-    show_dead = bool(args.all or cfg.show_dead)
+    if args.workers is not None:
+        cfg.workers = max(1, min(64, args.workers))
+    if args.family:
+        cfg.families_filter = [f.lower() for f in args.family]
+        from panel.config import _apply_filters
+
+        # re-filter from full discover
+        cfg2 = load_config(args.config)
+        cfg.profiles = cfg2.profiles
+        cfg.families_filter = [f.lower() for f in args.family]
+        if args.profile:
+            cfg.profiles_filter = list(args.profile)
+        _apply_filters(cfg)
+    elif args.profile:
+        cfg.profiles_filter = list(args.profile)
+        from panel.config import _apply_filters
+
+        cfg2 = load_config(args.config)
+        cfg.profiles = cfg2.profiles
+        cfg.profiles_filter = list(args.profile)
+        _apply_filters(cfg)
+    if args.only_live:
+        cfg.only_live = True
+        cfg.show_dead = False
+    show_dead = bool(args.all or cfg.show_dead) and not cfg.only_live
 
     if args.list_profiles:
+        fams = sorted({p.family for p in cfg.profiles})
         for p in cfg.profiles:
             flag = "on " if p.enabled else "off"
-            print(f"{flag}  {p.id:24}  {p.family:8}  {p.label:20}  {p.home}")
-        print(f"total={len(cfg.profiles)}  auto_discover={cfg.auto_discover}")
+            print(f"{flag}  {p.id:28}  {p.family:12}  {p.label:24}  {p.home}")
+        print(
+            f"total={len(cfg.profiles)}  families={len(fams)}  "
+            f"auto_discover={cfg.auto_discover}  workers={cfg.workers}"
+        )
+        print(f"families: {', '.join(fams)}")
         return 0
 
     if args.serve:
@@ -181,9 +233,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.html:
+        # optional only-live for snapshot cards
+        if cfg.only_live:
+            from panel.models import Status
+
+            results = [r for r in results if r.status.value == "live"]
+            payload = build_payload(results, wall, meta=payload.get("meta") or {})
         out = Path(args.html)
         write_dashboard(results, wall, out, theme=cfg.theme)
-        print(f"Wrote {out.resolve()}  (profiles={len(results)}, theme={cfg.theme})")
+        print(
+            f"Wrote {out.resolve()}  (profiles={len(results)}, "
+            f"theme={cfg.theme}, workers={cfg.workers})"
+        )
         if args.open:
             webbrowser.open(out.resolve().as_uri())
     else:

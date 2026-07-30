@@ -1,5 +1,3 @@
-import re
-
 from panel.html_dash import render_dashboard_html
 from panel.models import ProfileResult, Status, Window
 
@@ -22,13 +20,17 @@ def test_no_duplicate_week_or_date_in_panel():
         ],
     )
     html = render_dashboard_html([r], 10.0, theme="dark", live=False)
-    # extract first panel-stat body
-    m = re.search(r'class="panel panel-stat">(.*?)</div>\s*</div>\s*</div>', html, re.S)
-    assert m
-    body = m.group(1)
+    # Only the visible panel body before footer/script
+    start = html.find('data-label="codex/work"')
+    assert start > 0
+    end = html.find("Offline / auth", start)
+    if end < 0:
+        end = html.find('<script', start)
+    body = html[start:end]
     assert body.count("2026-08-05 00:09") == 1
-    assert len(re.findall(r"\bweek\b", body, re.I)) == 1
-    # only the human label "remaining · week", not title attrs spam
-    assert len(re.findall(r"stat-title\">remaining", body)) == 1
+    assert body.lower().count("week") == 1
+    assert "remaining · week" in body
     assert "themeToggle" in html
     assert 'data-theme="dark"' in html
+    assert "profileSearch" in html
+    assert "chip-filter" in html

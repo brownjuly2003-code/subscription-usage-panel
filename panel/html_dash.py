@@ -20,16 +20,28 @@ G = {
     "super": "#8AB8FF",
 }
 
-FAMILY_COLOR = {
-    "claude": G["orange"],
-    "codex": G["purple"],
-    "grok": G["green"],
-    "gemini": "#4285F4",
-    "kimi": "#00C2A8",
-    "openrouter": "#A78BFA",
-    "openai": "#10A37F",
-    "github": "#8B949E",
-}
+def _family_colors() -> dict[str, str]:
+    try:
+        from panel.catalog import family_colors
+
+        c = family_colors()
+        if c:
+            return c
+    except Exception:
+        pass
+    return {
+        "claude": G["orange"],
+        "codex": G["purple"],
+        "grok": G["green"],
+        "gemini": "#4285F4",
+        "kimi": "#00C2A8",
+        "openrouter": "#A78BFA",
+        "openai": "#10A37F",
+        "github": "#8B949E",
+    }
+
+
+FAMILY_COLOR = _family_colors()
 
 
 def _esc(s: str) -> str:
@@ -112,13 +124,15 @@ def _sparkline_svg(
 
 
 def _cards(results: List[ProfileResult]) -> tuple[list[dict], list[dict]]:
+    colors = _family_colors()
     live, offline = [], []
     for r in results:
-        color = FAMILY_COLOR.get(r.family, G["blue"])
+        color = colors.get(r.family, G["blue"])
         if r.status not in (Status.LIVE, Status.STALE) or not r.windows:
             offline.append(
                 {
                     "label": r.label,
+                    "family": r.family,
                     "color": color,
                     "status": r.status.value,
                     "reason": r.reason or r.status.value,
@@ -179,6 +193,11 @@ def render_dashboard_html(
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     live_n = sum(1 for r in results if r.status == Status.LIVE)
     total = len(results)
+    families_present = sorted({c["family"] for c in live_cards} | {o["family"] for o in offline})
+    family_chips = "".join(
+        f'<button type="button" class="chip chip-filter" data-family="{_esc(f)}">{_esc(f)}</button>'
+        for f in families_present
+    )
 
     # alert strip
     alert_html = ""
@@ -245,7 +264,7 @@ def render_dashboard_html(
 
         stat_panels.append(
             f"""
-      <div class="panel panel-stat">
+      <div class="panel panel-stat" data-family="{_esc(c['family'])}" data-label="{_esc(c['label']).lower()}" data-kind="live">
         <div class="panel-header">
           <div class="panel-title">
             <span class="series-dot" style="background:{c['color']}"></span>
@@ -294,15 +313,15 @@ def render_dashboard_html(
           </tr>"""
             )
         table_panel = f"""
-    <div class="row">
-      <div class="panel panel-table">
+    <div class="row row-wide">
+      <div class="panel panel-table" data-kind="offline" id="offlinePanel">
         <div class="panel-header">
           <div class="panel-title">
-            <span class="panel-title-text">Offline / auth</span>
+            <span class="panel-title-text">Offline / auth ({len(offline)})</span>
           </div>
-          <div class="panel-menu" aria-hidden="true"><span></span><span></span><span></span></div>
+          <button type="button" class="gf-btn" id="toggleOffline" style="height:24px;font-size:11px">Collapse</button>
         </div>
-        <div class="panel-content table-content">
+        <div class="panel-content table-content" id="offlineBody">
           <table class="gf-table">
             <thead>
               <tr>
@@ -609,16 +628,53 @@ def render_dashboard_html(
   }}
   .row {{
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 8px;
     margin-bottom: 8px;
   }}
-  @media (max-width: 1100px) {{
-    .row {{ grid-template-columns: repeat(2, 1fr); }}
+  .row-wide {{ display: block; }}
+  .filter-bar {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 8px;
   }}
+  .chip-filter {{
+    cursor: pointer;
+    background: var(--gf-primary-bg);
+    border: 1px solid var(--gf-border-weak);
+    color: var(--gf-text-secondary);
+    border-radius: 2px;
+    padding: 3px 8px;
+    font-size: 11px;
+    text-transform: lowercase;
+  }}
+  .chip-filter.active {{
+    border-color: var(--gf-action);
+    color: var(--gf-text-max);
+  }}
+  .filter-count {{
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--gf-text-disabled);
+    font-variant-numeric: tabular-nums;
+  }}
+  .search-box {{
+    height: 32px;
+    min-width: 160px;
+    border: 1px solid var(--gf-border-medium);
+    border-radius: 2px;
+    background: var(--gf-primary-bg);
+    color: var(--gf-text-primary);
+    padding: 0 10px;
+    font-size: 12px;
+    font-family: var(--gf-font);
+  }}
+  .panel.is-hidden {{ display: none !important; }}
   @media (max-width: 700px) {{
-    .row {{ grid-template-columns: 1fr; }}
     .sidemenu {{ display: none; }}
+    .search-box {{ min-width: 120px; }}
   }}
 
   /* ----- Panel chrome (core Grafana look) ----- */
@@ -871,6 +927,7 @@ def render_dashboard_html(
           <div class="dash-subtitle">Claude · Codex · Grok — subscription remaining only</div>
         </div>
         <div class="dash-controls">
+          <input type="search" id="profileSearch" class="search-box" placeholder="Filter profiles…" />
           <button type="button" class="gf-btn" id="themeToggle" title="Toggle light / dark">
             <span class="ico" id="themeIcon">◐</span>
             <span id="themeLabel">Theme</span>
@@ -880,16 +937,17 @@ def render_dashboard_html(
             {_esc(now)}
           </div>
           {f'<span class="gf-btn"><span class="live-dot"></span>Live · {int(poll_seconds)}s</span>' if live else '<span class="gf-btn">Snapshot</span>'}
-          <div class="gf-btn" title="Refresh data">
-            <span class="ico">↻</span>
-            Refresh
-          </div>
         </div>
       </div>
 
       <div class="dashboard">
+        <div class="filter-bar">
+          <button type="button" class="chip chip-filter active" data-family="*">all</button>
+          {family_chips}
+          <span class="filter-count" id="filterCount">{len(live_cards)} live · {len(offline)} offline · {total} total</span>
+        </div>
         {alert_html}
-        <div class="row">
+        <div class="row" id="liveGrid">
           {''.join(stat_panels)}
         </div>
         {table_panel}
@@ -936,6 +994,65 @@ def render_dashboard_html(
         u.searchParams.set("_", String(Date.now()));
         window.location.replace(u.toString());
       }}, POLL * 1000);
+    }}
+
+    // Scale UI: filter by family + search (works with 100+ profiles)
+    var activeFamily = "*";
+    var searchBox = document.getElementById("profileSearch");
+    var chips = document.querySelectorAll(".chip-filter");
+    function applyFilters() {{
+      var q = (searchBox && searchBox.value || "").toLowerCase().trim();
+      var panels = document.querySelectorAll(".panel-stat");
+      var shown = 0;
+      panels.forEach(function (el) {{
+        var fam = el.getAttribute("data-family") || "";
+        var lab = el.getAttribute("data-label") || "";
+        var okFam = activeFamily === "*" || fam === activeFamily;
+        var okQ = !q || lab.indexOf(q) !== -1 || fam.indexOf(q) !== -1;
+        var hide = !(okFam && okQ);
+        el.classList.toggle("is-hidden", hide);
+        if (!hide) shown += 1;
+      }});
+      var off = document.getElementById("offlinePanel");
+      if (off) {{
+        var offHide = activeFamily !== "*" && true;
+        // keep offline visible unless searching for something else
+        if (q) {{
+          off.classList.toggle("is-hidden", true);
+        }} else if (activeFamily !== "*") {{
+          // show offline table only when "all"
+          off.classList.toggle("is-hidden", true);
+        }} else {{
+          off.classList.toggle("is-hidden", false);
+        }}
+      }}
+      var fc = document.getElementById("filterCount");
+      if (fc) fc.textContent = shown + " shown · filter=" + activeFamily + (q ? (" · q=" + q) : "");
+    }}
+    chips.forEach(function (ch) {{
+      ch.addEventListener("click", function () {{
+        chips.forEach(function (c) {{ c.classList.remove("active"); }});
+        ch.classList.add("active");
+        activeFamily = ch.getAttribute("data-family") || "*";
+        applyFilters();
+      }});
+    }});
+    if (searchBox) searchBox.addEventListener("input", applyFilters);
+
+    var tog = document.getElementById("toggleOffline");
+    var offBody = document.getElementById("offlineBody");
+    if (tog && offBody) {{
+      // collapse offline by default when many rows
+      var rows = offBody.querySelectorAll("tbody tr").length;
+      if (rows > 8) {{
+        offBody.style.display = "none";
+        tog.textContent = "Expand";
+      }}
+      tog.addEventListener("click", function () {{
+        var hid = offBody.style.display === "none";
+        offBody.style.display = hid ? "" : "none";
+        tog.textContent = hid ? "Collapse" : "Expand";
+      }});
     }}
   }})();
   </script>

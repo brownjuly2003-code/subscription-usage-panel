@@ -1,46 +1,26 @@
-# Subscription Usage Panel — example config
-# Copy to config.yaml and edit, or rely on auto-discover.
+# Subscription Usage Panel — scalable config
+# Designed for many networks × many homes (e.g. 20 families × 100 profiles).
 
 interval: 60
-timeout_s: 10
-workers: 8
+timeout_s: 8
+workers: 16          # parallel fetches (raise toward 32–64 for huge fleets)
 show_dead: true
-bar_width: 5
+only_live: false
+auto_discover: true  # scan ~ using panel/catalog.yaml
+theme: dark          # dark | light
 
-# When true, scan ~ for known provider homes and merge with profiles below.
-auto_discover: true
+# Optional filters (also CLI: --family codex --profile codex-work --only-live)
+# families: [claude, codex, grok, gemini, kimi]
+# profiles_filter: [codex-work, grok-personal]
 
-# Optional explicit list (merged with discovery; id must be unique).
+# Explicit profiles merge with discovery (same home → explicit wins)
 # profiles:
-#   - id: claude-work
-#     family: claude
-#     label: CLAUDE/work
-#     home: ~/.claude-work
-#     enabled: true
 #   - id: codex-work
 #     family: codex
 #     label: CODEX/work
 #     home: ~/.codex-work
 #     enabled: true
-#   - id: grok-work
-#     family: grok
-#     label: GROK/work
-#     home: ~/.grok-work
-#     enabled: true
 
-# Title colors (RGB "R;G;B") for terminal output
-colors:
-  claude: "200;170;100"
-  codex: "175;130;190"
-  grok: "100;185;185"
-  gemini: "66;133;244"
-  kimi: "0;194;168"
-  openrouter: "167;139;250"
-  openai: "16;163;127"
-  github: "139;148;158"
-
-# Default HTML theme: dark | light
-theme: dark
-
-# Optional env keys (also auto-detected if set):
-# OPENROUTER_API_KEY, KIMI_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, GH_TOKEN
+# Optional RGB overrides for terminal colors
+# colors:
+#   codex: "175;130;190"

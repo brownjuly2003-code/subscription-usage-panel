@@ -1,36 +1,23 @@
 # Subscription Usage Panel
 
-**Local multi-profile dashboard for subscription remaining limits** across popular AI coding providers.
+Universal **multi-network × multi-profile** dashboard for **subscription / plan remaining limits**.
 
-Not API billing noise. Not session token cost. **Plan / quota remaining only.**
+Designed for fleets like *20 provider families × 100 homes* — not a single-user hardcoded setup.
 
-### Built-in families
-
-| Family | Discover / env | Metric |
-|--------|----------------|--------|
-| Claude | `~/.claude*` | 5h / 7d utilization |
-| Codex | `~/.codex*` | ChatGPT plan windows |
-| Grok | `~/.grok*` | SuperGrok pool % |
-| Gemini | `~/.gemini*`, `GEMINI_API_KEY` | OAuth quota / key |
-| Kimi | `~/.kimi*`, `KIMI_API_KEY` | coding usage windows |
-| OpenRouter | `OPENROUTER_API_KEY` | key limit remaining |
-| OpenAI | `OPENAI_API_KEY` | key valid (plan → codex) |
-| GitHub | `GH_TOKEN` / `gh` | REST rate limit remaining |
-
-More via plugins: `register_provider` / `register_family`.
+Not API cost noise. Not session token totals. **Remaining quota windows only.**
 
 [![CI](https://github.com/brownjuly2003-code/subscription-usage-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/brownjuly2003-code/subscription-usage-panel/actions/workflows/ci.yml)
 
-## Why this exists
+## Design goals
 
-You juggle **multiple AI CLIs** and **multiple homes** (`~/.codex-work`, `~/.claude`, `~/.grok-…`).  
-Official UIs are scattered. This tool:
-
-1. **Auto-discovers** every profile home under `~`
-2. Fetches **subscription remaining** in parallel
-3. Surfaces **alerts** (critical / warn) + **absolute reset dates**
-4. Serves a **live Grafana-inspired dashboard** (`--serve`) or a static HTML snapshot
-5. Speaks **versioned JSON (`sup.v1`)** for agents and CI hooks
+| Goal | How |
+|------|-----|
+| Many networks | Declarative `panel/catalog.yaml` (19 families) + plugins |
+| Many profiles | Auto-discover every matching home under `~` |
+| Fast at scale | Parallel fetch (`workers: 16–64`) |
+| Usable UI at 100 cards | Family chips, search box, collapsible offline table |
+| Automation | JSON schema `sup.v1`, `--strict-exit`, live `--serve` |
+| Themes | Dark / Light toggle |
 
 ## Install
 
@@ -38,71 +25,40 @@ Official UIs are scattered. This tool:
 git clone https://github.com/brownjuly2003-code/subscription-usage-panel.git
 cd subscription-usage-panel
 python -m venv .venv
-# Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-# optional editable: pip install -e ".[dev]"
 ```
 
 ## Quick start
 
 ```bash
-python limits.py --list-profiles   # what will be scanned
-python limits.py                   # terminal + alerts
-python limits.py --html --open     # static dashboard
-python limits.py --serve --open    # LIVE dashboard (auto-refresh)
-python limits.py --json            # schema sup.v1
-python limits.py --strict-exit     # exit 1=warn 2=crit 3=no-live
+python limits.py --list-profiles
+python limits.py
+python limits.py --html --open
+python limits.py --serve --open          # live dashboard
+python limits.py --json                  # schema sup.v1
+python limits.py --strict-exit           # CI hooks
 ```
 
-Windows:
-
-```powershell
-.\open-dashboard.ps1
-```
-
-### Live server
+### Filters (for huge fleets)
 
 ```bash
-python limits.py --serve --open --port 8765
+python limits.py --family codex --family grok
+python limits.py --profile codex-work --profile grok-personal
+python limits.py --only-live
+python limits.py --workers 32 --html --open
 ```
 
-| URL | Purpose |
-|-----|---------|
-| `http://127.0.0.1:8765/` | Live HTML (polls every `interval` s) |
-| `/api/usage` | JSON `sup.v1` |
-| `/api/refresh` | Force re-fetch |
-| `/api/health` | Liveness |
+## Catalog of networks
 
-Theme: **Dark / Light** toggle in the toolbar (persisted in `localStorage`).
+Rules live in **`panel/catalog.yaml`** (extend without rewriting core code):
 
-## Multi-network & multi-profile
+- **Implemented fetchers:** `claude`, `codex`, `grok`, `gemini`, `kimi`, `openrouter`, `openai`, `github`
+- **Discoverable stubs** (home/env detected, remaining when you add a fetcher or token works later):  
+  `cursor`, `copilot`, `amp`, `opencode`, `zai`, `minimax`, `windsurf`, `continue`, `aider`, `litellm`, `anthropic_api`
 
-### Auto-discover (default)
+A user with no local Cursor/Gemini today still benefits: **tomorrow’s homes appear automatically**.
 
-| Family | Homes | Credential |
-|--------|-------|------------|
-| claude | `~/.claude`, `~/.claude-*` | `.credentials.json` |
-| codex | `~/.codex`, `~/.codex-*` | `auth.json` |
-| grok | `~/.grok`, `~/.grok-*` | `auth.json` |
-
-Skip patterns: `*archive*`, `*backup*`, `*cold*`, …
-
-### Explicit config
-
-Copy `config.example.yaml` → `config.yaml` (gitignored):
-
-```yaml
-auto_discover: true
-theme: dark
-interval: 60
-profiles:
-  - id: codex-work
-    family: codex
-    label: CODEX/work
-    home: ~/.codex-work
-```
-
-### Plugin / new family
+### Plugin
 
 ```python
 from panel.providers import register_provider
@@ -112,48 +68,69 @@ register_family("myai", ".myai", "auth.json")
 register_provider("myai", fetch_myai)
 ```
 
+Or add a family block to `catalog.yaml` + implement `fetch_*`.
+
 See [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
-## JSON schema (`sup.v1`)
+## Multi-profile discovery
 
-```json
-{
-  "schemaVersion": "sup.v1",
-  "summary": {
-    "profiles_live": 3,
-    "alerts_critical": 1,
-    "tightest": { "label": "CODEX/work", "remaining_pct": 4.0, "period": "week" }
-  },
-  "alerts": [{ "level": "critical", "message": "..." }],
-  "profiles": [{ "id": "...", "urgency": "critical", "primary": { "remaining_pct": 4.0, "reset_at": "..." } }]
-}
+For each catalog family, scans:
+
+- `~/{prefix}`, `~/{prefix}-*`, `~/{prefix}_*`
+- nested prefixes like `~/.config/github-copilot`
+- env keys (`OPENROUTER_API_KEY`, `GH_TOKEN`, …) → virtual `FAMILY/env` profile
+- skips `*archive*`, `*backup*`, …
+
+## Dashboard UX (scale)
+
+- Auto-fill grid of stat panels (one profile = one card)
+- **Family filter chips** + **search**
+- Offline table **collapsed** when many rows
+- Dark / Light theme
+- Alerts strip (critical / warn)
+- Absolute **reset date once** + relative once
+- History-based sparkline when `.cache/history` has points; otherwise honest bar
+
+### Live server
+
+```bash
+python limits.py --serve --open --port 8765 --workers 32
 ```
 
-### Exit codes (`--strict-exit`)
+| URL | |
+|-----|--|
+| `/` | Live HTML (auto-refresh) |
+| `/api/usage` | `sup.v1` JSON |
+| `/api/refresh` | Force re-fetch |
+| `/api/health` | Health |
 
-| Code | Meaning |
-|------|---------|
-| 0 | Live profiles OK |
-| 1 | Remaining ≤ 20% (warn) |
-| 2 | Remaining ≤ 10% (critical) |
-| 3 | No live profiles |
+## Config
 
-## Data sources (subscription only)
+Copy `config.example.yaml` → `config.yaml` (gitignored).
 
-| Family | Endpoint |
-|--------|----------|
-| Claude | `GET api.anthropic.com/api/oauth/usage` |
-| Codex | `GET chatgpt.com/backend-api/wham/usage` |
-| Grok | gRPC-web `GetGrokCreditsConfig` (pool %, not monthly API credit counters) |
+```yaml
+auto_discover: true
+workers: 32
+theme: dark
+# families: [claude, codex, grok]
+# only_live: true
+```
 
-History: local `.cache/history/*.jsonl` for **real** sparklines (no synthetic curves).
+## Exit codes (`--strict-exit`)
+
+| Code | |
+|------|--|
+| 0 | OK |
+| 1 | remaining ≤ 20% |
+| 2 | remaining ≤ 10% |
+| 3 | no live profiles |
 
 ## Security
 
-- Uses credentials already written by official CLIs
-- Never prints tokens
-- `config.yaml` / `dashboard.html` / `.cache/` gitignored
-- Serve binds `127.0.0.1` by default
+- Uses credentials already stored by official CLIs / env
+- Never prints secrets
+- `config.yaml`, `dashboard.html`, `.cache/` gitignored
+- Serve defaults to `127.0.0.1`
 
 ## Tests
 
@@ -162,16 +139,10 @@ pip install pytest
 pytest -q
 ```
 
-## Roadmap toward 10/10
-
-- Optional Gemini / Cursor providers when stable local auth is available
-- Webhook / desktop notify on critical
-- Dashboard filters by family
-
 ## License
 
-MIT — [LICENSE](LICENSE)
+MIT
 
 ## Disclaimer
 
-Unofficial. Not affiliated with Anthropic, OpenAI, or xAI. Undocumented APIs can change.
+Unofficial. Not affiliated with Anthropic, OpenAI, xAI, Google, etc. Undocumented APIs change.
