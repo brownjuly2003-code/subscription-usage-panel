@@ -4,21 +4,34 @@ from panel.discover import discover_profiles, merge_profiles
 from panel.config import ProfileCfg
 
 
-def test_discover_finds_known_families(tmp_path: Path):
+def test_discover_finds_known_families(tmp_path: Path, monkeypatch):
+    # isolate from process env virtual profiles
+    for e in (
+        "OPENROUTER_API_KEY",
+        "KIMI_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    ):
+        monkeypatch.delenv(e, raising=False)
+
     (tmp_path / ".codex").mkdir()
     (tmp_path / ".codex" / "auth.json").write_text("{}", encoding="utf-8")
     (tmp_path / ".codex-work").mkdir()
     (tmp_path / ".codex-work" / "auth.json").write_text("{}", encoding="utf-8")
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / ".credentials.json").write_text("{}", encoding="utf-8")
-    # no auth — skip
     (tmp_path / ".grok").mkdir()
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "GEMINI.md").write_text("", encoding="utf-8")
 
     found = discover_profiles(tmp_path)
     ids = {p.id for p in found}
     assert "codex-default" in ids
     assert "codex-work" in ids
     assert "claude-default" in ids
+    assert "gemini-default" in ids
     assert not any(p.family == "grok" for p in found)
 
 

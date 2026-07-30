@@ -24,6 +24,11 @@ FAMILY_COLOR = {
     "claude": G["orange"],
     "codex": G["purple"],
     "grok": G["green"],
+    "gemini": "#4285F4",
+    "kimi": "#00C2A8",
+    "openrouter": "#A78BFA",
+    "openai": "#10A37F",
+    "github": "#8B949E",
 }
 
 

@@ -33,6 +33,14 @@ colors:
   claude: "200;170;100"
   codex: "175;130;190"
   grok: "100;185;185"
+  gemini: "66;133;244"
+  kimi: "0;194;168"
+  openrouter: "167;139;250"
+  openai: "16;163;127"
+  github: "139;148;158"
 
 # Default HTML theme: dark | light
 theme: dark
+
+# Optional env keys (also auto-detected if set):
+# OPENROUTER_API_KEY, KIMI_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, GH_TOKEN

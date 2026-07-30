@@ -1,8 +1,26 @@
 # Providers
 
-## Contract
+Built-in families (register more via `register_provider` / `register_family`):
 
-Each provider implements:
+| Family | Discover homes | Auth | Metric |
+|--------|----------------|------|--------|
+| **claude** | `~/.claude*` | OAuth `.credentials.json` | 5h / 7d utilization |
+| **codex** | `~/.codex*` | ChatGPT `auth.json` | plan rate windows |
+| **grok** | `~/.grok*` | OIDC `auth.json` | SuperGrok pool % |
+| **gemini** | `~/.gemini*` | OAuth file or `GEMINI_API_KEY` | best-effort quota / auth |
+| **kimi** | `~/.kimi*`, `~/.kimi-code` | token file or `KIMI_API_KEY` | 5h / 7d / mo windows |
+| **openrouter** | `~/.openrouter*` | `OPENROUTER_API_KEY` | key limit remaining |
+| **openai** | `~/.openai*` | `OPENAI_API_KEY` | key valid (plan → codex) |
+| **github** | env / `gh` hosts | `GH_TOKEN` | REST rate limit remaining |
+
+## Notes
+
+- **GitHub** = API rate limit, **not** Copilot premium quota (undocumented).
+- **OpenAI API key** ≠ ChatGPT subscription; use **codex** profiles for Plus/Pro windows.
+- **Gemini API key** rarely exposes remaining %; OAuth path is preferred when available.
+- Env-only keys create a virtual `FAMILY/env` profile when no home is found.
+
+## Contract
 
 ```python
 def fetch_*(
@@ -11,17 +29,8 @@ def fetch_*(
     home: Path,
     client: httpx.Client,
     timeout: float,
-) -> ProfileResult:
-    ...
+) -> ProfileResult: ...
 ```
-
-Return `ProfileResult` with:
-
-- `status`: `live` | `auth` | `dead` | `stale` | `error`
-- `windows`: list of `Window(label, used_pct, rem_pct, reset, reset_at)`
-- Never put secrets in `reason` / `meta`
-
-Register:
 
 ```python
 from panel.providers import register_provider
@@ -30,26 +39,3 @@ from panel.discover import register_family
 register_family("myai", ".myai", "auth.json")
 register_provider("myai", fetch_myai)
 ```
-
-## Built-in
-
-### Claude
-
-- Home: `~/.claude`, `~/.claude-*`
-- Token: `.credentials.json` → `claudeAiOauth.accessToken`
-- API: `GET https://api.anthropic.com/api/oauth/usage`
-- Windows: `five_hour`, `seven_day` utilization
-
-### Codex
-
-- Home: `~/.codex`, `~/.codex-*`
-- Token: `auth.json` → `tokens.access_token` + `account_id`
-- API: `GET https://chatgpt.com/backend-api/wham/usage`
-- Windows: `rate_limit.primary_window` / `secondary_window`
-
-### Grok (SuperGrok)
-
-- Home: `~/.grok`, `~/.grok-*`
-- Token: `auth.json` OIDC `key`
-- API: gRPC-web `POST https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig`
-- Metric: `credit_usage_percent` (subscription pool), **not** `cli-chat-proxy/v1/billing` absolute credits
