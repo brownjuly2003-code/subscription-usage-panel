@@ -1,8 +1,23 @@
 # Subscription Usage Panel
 
-**Local multi-profile dashboard for subscription remaining limits** — Claude, Codex, Grok, and plugins.
+**Local multi-profile dashboard for subscription remaining limits** across popular AI coding providers.
 
-Not API billing noise. Not session token cost. **Plan remaining only.**
+Not API billing noise. Not session token cost. **Plan / quota remaining only.**
+
+### Built-in families
+
+| Family | Discover / env | Metric |
+|--------|----------------|--------|
+| Claude | `~/.claude*` | 5h / 7d utilization |
+| Codex | `~/.codex*` | ChatGPT plan windows |
+| Grok | `~/.grok*` | SuperGrok pool % |
+| Gemini | `~/.gemini*`, `GEMINI_API_KEY` | OAuth quota / key |
+| Kimi | `~/.kimi*`, `KIMI_API_KEY` | coding usage windows |
+| OpenRouter | `OPENROUTER_API_KEY` | key limit remaining |
+| OpenAI | `OPENAI_API_KEY` | key valid (plan → codex) |
+| GitHub | `GH_TOKEN` / `gh` | REST rate limit remaining |
+
+More via plugins: `register_provider` / `register_family`.
 
 [![CI](https://github.com/brownjuly2003-code/subscription-usage-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/brownjuly2003-code/subscription-usage-panel/actions/workflows/ci.yml)
 
