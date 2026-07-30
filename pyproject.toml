@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "subscription-usage-panel"
-version = "1.1.0"
+version = "1.2.0"
 description = "Multi-profile subscription remaining limits for Claude, Codex, Grok and plugins"
 readme = "README.md"
 requires-python = ">=3.10"
