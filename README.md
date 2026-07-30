@@ -25,7 +25,7 @@ You run several AI CLIs with **several accounts/homes**. Official UIs are scatte
 ## Install
 
 ```bash
-git clone https://github.com/<you>/subscription-usage-panel.git
+git clone https://github.com/brownjuly2003-code/subscription-usage-panel.git
 cd subscription-usage-panel
 python -m venv .venv
 # Windows: .venv\Scripts\activate
