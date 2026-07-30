@@ -1,0 +1,38 @@
+# Subscription Usage Panel — example config
+# Copy to config.yaml and edit, or rely on auto-discover.
+
+interval: 60
+timeout_s: 10
+workers: 8
+show_dead: true
+bar_width: 5
+
+# When true, scan ~ for known provider homes and merge with profiles below.
+auto_discover: true
+
+# Optional explicit list (merged with discovery; id must be unique).
+# profiles:
+#   - id: claude-work
+#     family: claude
+#     label: CLAUDE/work
+#     home: ~/.claude-work
+#     enabled: true
+#   - id: codex-work
+#     family: codex
+#     label: CODEX/work
+#     home: ~/.codex-work
+#     enabled: true
+#   - id: grok-work
+#     family: grok
+#     label: GROK/work
+#     home: ~/.grok-work
+#     enabled: true
+
+# Title colors (RGB "R;G;B") for terminal output
+colors:
+  claude: "200;170;100"
+  codex: "175;130;190"
+  grok: "100;185;185"
+
+# Default HTML theme: dark | light
+theme: dark

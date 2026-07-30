@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+.venv/
+venv/
+.env
+config.yaml
+dashboard.html
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+_*.json
+_*.py
+!panel/**/*.py
