@@ -60,8 +60,22 @@ def render_window(w: Window, bar_width: int) -> str:
     return " ".join(parts)
 
 
+def _display_windows(windows: List[Window]) -> List[Window]:
+    """Drop unused secondary limit rows (e.g. Spark 0%) when primary exists."""
+    if len(windows) <= 1:
+        return list(windows)
+    main = [
+        w
+        for w in windows
+        if not (float(w.used_pct) <= 0.01 and float(w.rem_pct) >= 99.9)
+    ]
+    return main or list(windows)
+
+
 def render_windows(windows: List[Window], bar_width: int) -> str:
-    return "  ".join(render_window(w, bar_width) for w in windows)
+    return "  ".join(
+        render_window(w, bar_width) for w in _display_windows(windows)
+    )
 
 
 def filter_results(
@@ -124,33 +138,6 @@ def render_frame(
 
 
 def results_to_json(results: list[ProfileResult], wall_ms: float) -> dict:
-    rows = []
-    for r in results:
-        rows.append(
-            {
-                "id": r.id,
-                "family": r.family,
-                "label": r.label,
-                "status": r.status.value,
-                "reason": r.reason,
-                "email": r.email,
-                "plan": r.plan,
-                "latency_ms": round(r.latency_ms, 1),
-                "windows": [
-                    {
-                        "label": w.label,
-                        "used_pct": w.used_pct,
-                        "rem_pct": w.rem_pct,
-                        "reset": w.reset,
-                        "reset_at": w.reset_at,
-                    }
-                    for w in r.windows
-                ],
-                "meta": r.meta,
-            }
-        )
-    return {
-        "kind": "subscription_usage",
-        "wall_ms": round(wall_ms, 1),
-        "profiles": rows,
-    }
+    from panel.schema import build_payload
+
+    return build_payload(results, wall_ms, meta={"mode": "cli"})

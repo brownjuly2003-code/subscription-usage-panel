@@ -3,12 +3,10 @@ from __future__ import annotations
 
 import html
 import json
-import math
 from datetime import datetime
 from typing import List
 
 from panel.models import ProfileResult, Status
-from panel.render import results_to_json
 from panel.timefmt import fmt_pct
 
 # Official-ish Grafana palette (classic colors)
@@ -54,22 +52,33 @@ def _window_human(label: str) -> str:
     return m.get((label or "").lower(), label or "period")
 
 
-def _sparkline_svg(rem: float, used: float, color: str, w: int = 280, h: int = 48) -> str:
-    """Grafana-like area sparkline under stat (synthetic smooth path to current rem)."""
+def _sparkline_svg(
+    rem: float,
+    color: str,
+    history: list | None = None,
+    w: int = 280,
+    h: int = 48,
+) -> str:
+    """Sparkline from real history points; if none, honest remaining bar (no fake data)."""
     rem = max(0.0, min(100.0, rem))
-    # 24 points: gentle wander ending at rem
-    pts = []
-    n = 24
-    for i in range(n):
-        t = i / (n - 1)
-        # approach rem from ~ rem*0.7..rem
-        base = rem * (0.55 + 0.45 * t)
-        wobble = math.sin(i * 0.9) * min(8, rem * 0.08)
-        yv = max(0.0, min(100.0, base + wobble))
-        if i == n - 1:
-            yv = rem
-        pts.append(yv)
-    # map to SVG: y=0 top → invert (high rem = high on chart like grafana series)
+    pts: list[float] = []
+    if history:
+        for pt in history:
+            try:
+                pts.append(max(0.0, min(100.0, float(pt.get("remaining_pct")))))
+            except (TypeError, ValueError, AttributeError):
+                continue
+    if len(pts) < 2:
+        # honest single-value bar: used (gray) | remaining (color)
+        used = 100.0 - rem
+        return f"""
+    <div class="rem-bar" title="remaining {rem:.1f}%">
+      <div class="rem-bar-used" style="width:{used:.2f}%"></div>
+      <div class="rem-bar-left" style="width:{rem:.2f}%;background:{color}"></div>
+    </div>"""
+
+    n = len(pts)
+
     def xy(i, v):
         x = 2 + (w - 4) * i / (n - 1)
         y = 2 + (h - 4) * (1 - v / 100.0)
@@ -80,11 +89,10 @@ def _sparkline_svg(rem: float, used: float, color: str, w: int = 280, h: int = 4
         x, y = xy(i, v)
         path.append(f"{'M' if i == 0 else 'L'}{x:.1f},{y:.1f}")
     line = " ".join(path)
-    # area close
     x0, _ = xy(0, pts[0])
     xn, _ = xy(n - 1, pts[-1])
     area = f"{line} L{xn:.1f},{h - 1} L{x0:.1f},{h - 1} Z"
-    grad_id = f"g{abs(hash((rem, used, color))) % 10_000_000}"
+    grad_id = f"g{abs(hash((tuple(pts[-8:]), color))) % 10_000_000}"
     return f"""
     <svg class="spark" viewBox="0 0 {w} {h}" preserveAspectRatio="none" aria-hidden="true">
       <defs>
@@ -149,22 +157,49 @@ def render_dashboard_html(
     wall_ms: float,
     title: str = "Subscription remaining",
     theme: str = "dark",
+    live: bool = False,
+    poll_seconds: int = 60,
+    payload: dict | None = None,
 ) -> str:
+    from panel.history import attach_history, append_snapshot
+    from panel.schema import build_payload
+
     theme = "light" if str(theme).lower() == "light" else "dark"
-    live, offline = _cards(results)
-    payload = results_to_json(results, wall_ms)
+    live_cards, offline = _cards(results)
+    if payload is None:
+        payload = build_payload(results, wall_ms, meta={"mode": "html"})
+        append_snapshot(payload.get("profiles") or [])
+        attach_history(payload)
+    alerts = payload.get("alerts") or []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     live_n = sum(1 for r in results if r.status == Status.LIVE)
     total = len(results)
 
+    # alert strip
+    alert_html = ""
+    if alerts:
+        items = []
+        for a in alerts[:8]:
+            lvl = a.get("level") or "warn"
+            items.append(
+                f'<div class="alert-item { _esc(lvl) }">{_esc(a.get("message") or "")}</div>'
+            )
+        alert_html = f'<div class="alert-strip">{"".join(items)}</div>'
+
     # --- Stat panels: one fact each field, no duplicate rem/reset ---
     stat_panels = []
-    for c in live:
+    for c in live_cards:
         p = c["primary"]
         rem = p["rem_pct"]
         used = p["used_pct"]
         col = _threshold_rem(rem)
-        spark = _sparkline_svg(rem, used, col)
+        # map history: cards don't have id — recover from label match in payload
+        hist = []
+        for pp in payload.get("profiles") or []:
+            if pp.get("label") == c["label"] and pp.get("family") == c["family"]:
+                hist = pp.get("history") or []
+                break
+        spark = _sparkline_svg(rem, col, history=hist)
         plan = _esc(c["plan"]) if c["plan"] else ""
         period = _window_human(p.get("label") or "")
 
@@ -375,6 +410,57 @@ def render_dashboard_html(
     background: conic-gradient(from 180deg, #F2495C, #FF9830, #FADE2A, #73BF69, #5794F2, #B877D9, #F2495C);
     margin-bottom: 16px;
   }}
+  .alert-strip {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+  }}
+  .alert-item {{
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 2px;
+    border: 1px solid var(--gf-border-weak);
+    background: var(--gf-primary-bg);
+  }}
+  .alert-item.critical {{
+    color: var(--gf-error);
+    border-color: var(--gf-error);
+  }}
+  .alert-item.warn {{
+    color: var(--gf-warning);
+    border-color: var(--gf-warning);
+  }}
+  .alert-item.offline {{
+    color: var(--gf-text-secondary);
+  }}
+  .live-dot {{
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--gf-success);
+    margin-right: 6px;
+    box-shadow: 0 0 0 0 rgba(115,191,105,0.6);
+    animation: pulse 2s infinite;
+  }}
+  @keyframes pulse {{
+    0% {{ box-shadow: 0 0 0 0 rgba(115,191,105,0.5); }}
+    70% {{ box-shadow: 0 0 0 6px rgba(115,191,105,0); }}
+    100% {{ box-shadow: 0 0 0 0 rgba(115,191,105,0); }}
+  }}
+  .rem-bar {{
+    display: flex;
+    width: 100%;
+    height: 8px;
+    background: var(--gf-strong-bg);
+    border-radius: 1px;
+    overflow: hidden;
+    margin-top: 12px;
+  }}
+  .rem-bar-used {{ height: 100%; background: #52545c; opacity: 0.55; }}
+  html[data-theme="light"] .rem-bar-used {{ background: #c7c7d0; opacity: 0.9; }}
+  .rem-bar-left {{ height: 100%; }}
   .side-icon {{
     width: 40px;
     height: 40px;
@@ -788,17 +874,16 @@ def render_dashboard_html(
             <span class="ico">⏱</span>
             {_esc(now)}
           </div>
-          <div class="gf-btn" title="Refresh: re-run python limits.py --html">
+          {f'<span class="gf-btn"><span class="live-dot"></span>Live · {int(poll_seconds)}s</span>' if live else '<span class="gf-btn">Snapshot</span>'}
+          <div class="gf-btn" title="Refresh data">
             <span class="ico">↻</span>
             Refresh
-          </div>
-          <div class="gf-btn primary">
-            Snapshot
           </div>
         </div>
       </div>
 
       <div class="dashboard">
+        {alert_html}
         <div class="row">
           {''.join(stat_panels)}
         </div>
@@ -815,6 +900,8 @@ def render_dashboard_html(
   <script>
   (function () {{
     var KEY = "subscription-usage-panel-theme";
+    var LIVE = {str(live).lower()};
+    var POLL = {int(poll_seconds)};
     var root = document.documentElement;
     var btn = document.getElementById("themeToggle");
     var label = document.getElementById("themeLabel");
@@ -835,6 +922,16 @@ def render_dashboard_html(
         apply(cur === "dark" ? "light" : "dark");
       }});
     }}
+    // Live mode: reload page on interval (server re-renders HTML with fresh data)
+    if (LIVE && POLL > 0) {{
+      setInterval(function () {{
+        var t = root.getAttribute("data-theme") || "dark";
+        var u = new URL(window.location.href);
+        u.searchParams.set("theme", t);
+        u.searchParams.set("_", String(Date.now()));
+        window.location.replace(u.toString());
+      }}, POLL * 1000);
+    }}
   }})();
   </script>
 </body>
@@ -849,5 +946,6 @@ def write_dashboard(
     theme: str = "dark",
 ) -> None:
     path.write_text(
-        render_dashboard_html(results, wall_ms, theme=theme), encoding="utf-8"
+        render_dashboard_html(results, wall_ms, theme=theme, live=False),
+        encoding="utf-8",
     )

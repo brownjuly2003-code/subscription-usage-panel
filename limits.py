@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Subscription usage panel — Claude / Codex / Grok multi-profile.
+"""Subscription Usage Panel — multi-profile remaining limits.
 
 Usage:
-  python limits.py              # terminal
-  python limits.py --html       # write dashboard.html
+  python limits.py
   python limits.py --html --open
+  python limits.py --serve --open
   python limits.py --json
+  python limits.py --list-profiles
   python limits.py --watch
 """
 from __future__ import annotations
@@ -24,8 +25,10 @@ if str(ROOT) not in sys.path:
 
 from panel.config import load_config
 from panel.fetch import fetch_all
+from panel.history import append_snapshot, attach_history
 from panel.html_dash import write_dashboard
-from panel.render import render_frame, results_to_json
+from panel.render import render_frame
+from panel.schema import build_payload, exit_code_from_payload
 
 DEFAULT_HTML = ROOT / "dashboard.html"
 
@@ -46,55 +49,37 @@ def _enable_windows_ansi() -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Subscription remaining limits panel")
+    p = argparse.ArgumentParser(
+        description="Multi-profile subscription remaining limits (Claude/Codex/Grok+)"
+    )
     p.add_argument("--watch", "-w", action="store_true", help="terminal auto-refresh")
-    p.add_argument("--once", action="store_true", help="single shot (default)")
-    p.add_argument("--all", "-a", action="store_true", help="include dead/auth")
-    p.add_argument("--json", action="store_true", help="JSON stdout")
+    p.add_argument("--json", action="store_true", help="JSON stdout (schema sup.v1)")
     p.add_argument(
         "--html",
         nargs="?",
         const=str(DEFAULT_HTML),
         default=None,
-        help=f"write Grafana-style HTML (default: {DEFAULT_HTML})",
+        help=f"write HTML snapshot (default: {DEFAULT_HTML})",
     )
     p.add_argument(
-        "--open",
+        "--serve",
         action="store_true",
-        help="open HTML in browser after --html",
+        help="live local server (HTML + /api/usage auto-refresh)",
     )
-    p.add_argument(
-        "--theme",
-        choices=("dark", "light"),
-        default=None,
-        help="default HTML theme (also toggleable in the page)",
-    )
+    p.add_argument("--host", default="127.0.0.1", help="serve host (default 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8765, help="serve port (default 8765)")
+    p.add_argument("--open", action="store_true", help="open browser")
+    p.add_argument("--theme", choices=("dark", "light"), default=None)
     p.add_argument("--config", type=Path, default=None)
-    p.add_argument("--interval", type=int, default=None)
+    p.add_argument("--interval", type=int, default=None, help="refresh seconds (min 15)")
+    p.add_argument("--all", "-a", action="store_true", help="show offline in terminal")
+    p.add_argument("--list-profiles", action="store_true")
     p.add_argument(
-        "--list-profiles",
+        "--strict-exit",
         action="store_true",
-        help="list discovered/configured profiles and exit",
+        help="exit 1=warn 2=critical 3=no live (for CI/hooks)",
     )
     return p.parse_args(argv)
-
-
-def run_once(cfg, show_dead: bool, as_json: bool, html_path: str | None, do_open: bool) -> int:
-    results, wall = fetch_all(cfg)
-    if as_json:
-        print(json.dumps(results_to_json(results, wall), ensure_ascii=False, indent=2))
-    elif html_path:
-        out = Path(html_path)
-        write_dashboard(results, wall, out, theme=getattr(cfg, "theme", "dark"))
-        print(f"Wrote {out.resolve()}  (profiles={len(results)}, theme={cfg.theme})")
-        if do_open:
-            webbrowser.open(out.resolve().as_uri())
-    else:
-        sys.stdout.write(
-            render_frame(results, cfg, wall, show_dead=show_dead, watch=False)
-        )
-        sys.stdout.flush()
-    return 0
 
 
 def run_watch(cfg, show_dead: bool) -> int:
@@ -177,15 +162,49 @@ def main(argv: list[str] | None = None) -> int:
         print(f"total={len(cfg.profiles)}  auto_discover={cfg.auto_discover}")
         return 0
 
+    if args.serve:
+        from panel.server import serve
+
+        serve(cfg, host=args.host, port=args.port, open_browser=args.open)
+        return 0
+
     if args.watch:
         return run_watch(cfg, show_dead=show_dead)
-    return run_once(
-        cfg,
-        show_dead=show_dead,
-        as_json=args.json,
-        html_path=args.html,
-        do_open=args.open,
+
+    results, wall = fetch_all(cfg)
+    payload = build_payload(
+        results, wall, meta={"mode": "cli", "auto_discover": cfg.auto_discover}
     )
+    append_snapshot(payload.get("profiles") or [])
+    attach_history(payload)
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.html:
+        out = Path(args.html)
+        write_dashboard(results, wall, out, theme=cfg.theme)
+        print(f"Wrote {out.resolve()}  (profiles={len(results)}, theme={cfg.theme})")
+        if args.open:
+            webbrowser.open(out.resolve().as_uri())
+    else:
+        s = payload.get("summary") or {}
+        t = s.get("tightest")
+        if t:
+            print(
+                f"Tightest: {t['label']}  rem {t['remaining_pct']}%  "
+                f"({t.get('period')})  urgency={t.get('urgency')}"
+            )
+        for a in (payload.get("alerts") or [])[:5]:
+            if a.get("level") in ("critical", "warn"):
+                print(f"[{a['level'].upper()}] {a.get('message')}")
+        sys.stdout.write(
+            render_frame(results, cfg, wall, show_dead=show_dead, watch=False)
+        )
+        sys.stdout.flush()
+
+    if args.strict_exit:
+        return exit_code_from_payload(payload)
+    return 0
 
 
 if __name__ == "__main__":

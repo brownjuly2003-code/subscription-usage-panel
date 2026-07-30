@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subscription-usage-panel"
+version = "1.1.0"
+description = "Multi-profile subscription remaining limits for Claude, Codex, Grok and plugins"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Subscription Usage Panel contributors" }]
+dependencies = [
+  "httpx>=0.27",
+  "PyYAML>=6.0",
+]
+keywords = ["claude", "codex", "grok", "usage", "subscription", "rate-limit", "dashboard"]
+classifiers = [
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Utilities",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+sup = "limits:main"
+subscription-usage-panel = "limits:main"
+
+[tool.setuptools.packages.find]
+include = ["panel*"]
+
+[tool.setuptools]
+py-modules = ["limits"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,26 +1,21 @@
 # Subscription Usage Panel
 
-Local multi-profile dashboard for **subscription remaining limits** (not API billing cost, not session token totals).
+**Local multi-profile dashboard for subscription remaining limits** — Claude, Codex, Grok, and plugins.
 
-Built-in providers:
+Not API billing noise. Not session token cost. **Plan remaining only.**
 
-| Family | Source | What you see |
-|--------|--------|----------------|
-| **Claude** | `api.anthropic.com/api/oauth/usage` | 5h / 7d utilization |
-| **Codex** | `chatgpt.com/backend-api/wham/usage` | plan rate windows |
-| **Grok** | `GetGrokCreditsConfig` (gRPC-web) | SuperGrok pool % |
+[![CI](https://github.com/brownjuly2003-code/subscription-usage-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/brownjuly2003-code/subscription-usage-panel/actions/workflows/ci.yml)
 
-Grafana-inspired HTML (static snapshot) with **dark / light** theme toggle. Terminal mode included.
+## Why this exists
 
-> Unofficial. Uses local CLI credentials already on your machine. No passwords are stored by this tool.
+You juggle **multiple AI CLIs** and **multiple homes** (`~/.codex-work`, `~/.claude`, `~/.grok-…`).  
+Official UIs are scattered. This tool:
 
-## Why
-
-You run several AI CLIs with **several accounts/homes**. Official UIs are scattered. This tool:
-
-1. **Auto-discovers** profile homes under `~` (e.g. `~/.claude-work`, `~/.codex-personal`, `~/.grok`)
-2. Fetches **subscription usage only**
-3. Renders a clean remaining-focused dashboard you can open in any browser
+1. **Auto-discovers** every profile home under `~`
+2. Fetches **subscription remaining** in parallel
+3. Surfaces **alerts** (critical / warn) + **absolute reset dates**
+4. Serves a **live Grafana-inspired dashboard** (`--serve`) or a static HTML snapshot
+5. Speaks **versioned JSON (`sup.v1`)** for agents and CI hooks
 
 ## Install
 
@@ -29,122 +24,139 @@ git clone https://github.com/brownjuly2003-code/subscription-usage-panel.git
 cd subscription-usage-panel
 python -m venv .venv
 # Windows: .venv\Scripts\activate
-# Unix:    source .venv/bin/activate
 pip install -r requirements.txt
+# optional editable: pip install -e ".[dev]"
 ```
 
-Optional: copy `config.example.yaml` → `config.yaml` (gitignored).
-
-## Usage
+## Quick start
 
 ```bash
-# list discovered profiles
-python limits.py --list-profiles
-
-# terminal
-python limits.py
-
-# Grafana-style HTML + open browser
-python limits.py --html --open
-
-# light default theme (toggle still works in the page)
-python limits.py --html --theme light --open
-
-# machine-readable
-python limits.py --json
+python limits.py --list-profiles   # what will be scanned
+python limits.py                   # terminal + alerts
+python limits.py --html --open     # static dashboard
+python limits.py --serve --open    # LIVE dashboard (auto-refresh)
+python limits.py --json            # schema sup.v1
+python limits.py --strict-exit     # exit 1=warn 2=crit 3=no-live
 ```
 
-Windows helper:
+Windows:
 
 ```powershell
 .\open-dashboard.ps1
 ```
 
-### HTML theme
+### Live server
 
-- Button **Dark / Light** in the toolbar
-- Choice stored in `localStorage` (`subscription-usage-panel-theme`)
-- Default from `theme:` in config or `--theme`
+```bash
+python limits.py --serve --open --port 8765
+```
 
-## Profiles & multi-network
+| URL | Purpose |
+|-----|---------|
+| `http://127.0.0.1:8765/` | Live HTML (polls every `interval` s) |
+| `/api/usage` | JSON `sup.v1` |
+| `/api/refresh` | Force re-fetch |
+| `/api/health` | Liveness |
+
+Theme: **Dark / Light** toggle in the toolbar (persisted in `localStorage`).
+
+## Multi-network & multi-profile
 
 ### Auto-discover (default)
 
-Scans `$HOME` for:
+| Family | Homes | Credential |
+|--------|-------|------------|
+| claude | `~/.claude`, `~/.claude-*` | `.credentials.json` |
+| codex | `~/.codex`, `~/.codex-*` | `auth.json` |
+| grok | `~/.grok`, `~/.grok-*` | `auth.json` |
 
-| Family | Home pattern | Credential file |
-|--------|--------------|-----------------|
-| claude | `.claude`, `.claude-*` | `.credentials.json` |
-| codex | `.codex`, `.codex-*` | `auth.json` |
-| grok | `.grok`, `.grok-*` | `auth.json` |
-
-Archive-like names (`*cold_archive*`, `*backup*`, …) are skipped.
+Skip patterns: `*archive*`, `*backup*`, `*cold*`, …
 
 ### Explicit config
 
+Copy `config.example.yaml` → `config.yaml` (gitignored):
+
 ```yaml
 auto_discover: true
+theme: dark
+interval: 60
 profiles:
   - id: codex-work
     family: codex
     label: CODEX/work
     home: ~/.codex-work
-    enabled: true
 ```
 
-Explicit entries override discovery for the same home path.
-
-### Add another network (fork / plugin)
+### Plugin / new family
 
 ```python
-# my_provider.py
 from panel.providers import register_provider
 from panel.discover import register_family
 
-def fetch_my(...):
-    ...
-
 register_family("myai", ".myai", "auth.json")
-register_provider("myai", fetch_my)
+register_provider("myai", fetch_myai)
 ```
 
-Then set `family: myai` in config, or rely on discovery once the home layout matches.
+See [docs/PROVIDERS.md](docs/PROVIDERS.md).
+
+## JSON schema (`sup.v1`)
+
+```json
+{
+  "schemaVersion": "sup.v1",
+  "summary": {
+    "profiles_live": 3,
+    "alerts_critical": 1,
+    "tightest": { "label": "CODEX/work", "remaining_pct": 4.0, "period": "week" }
+  },
+  "alerts": [{ "level": "critical", "message": "..." }],
+  "profiles": [{ "id": "...", "urgency": "critical", "primary": { "remaining_pct": 4.0, "reset_at": "..." } }]
+}
+```
+
+### Exit codes (`--strict-exit`)
+
+| Code | Meaning |
+|------|---------|
+| 0 | Live profiles OK |
+| 1 | Remaining ≤ 20% (warn) |
+| 2 | Remaining ≤ 10% (critical) |
+| 3 | No live profiles |
+
+## Data sources (subscription only)
+
+| Family | Endpoint |
+|--------|----------|
+| Claude | `GET api.anthropic.com/api/oauth/usage` |
+| Codex | `GET chatgpt.com/backend-api/wham/usage` |
+| Grok | gRPC-web `GetGrokCreditsConfig` (pool %, not monthly API credit counters) |
+
+History: local `.cache/history/*.jsonl` for **real** sparklines (no synthetic curves).
 
 ## Security
 
-- Reads local auth files written by official CLIs (`claude`, `codex`, `grok login`)
-- Never prints access tokens
-- `config.yaml` and `dashboard.html` are gitignored (local only)
-- Do not commit real credentials
+- Uses credentials already written by official CLIs
+- Never prints tokens
+- `config.yaml` / `dashboard.html` / `.cache/` gitignored
+- Serve binds `127.0.0.1` by default
 
-## Architecture
+## Tests
 
-```
-limits.py              CLI
-panel/
-  config.py            YAML + merge discover
-  discover.py          multi-home scan
-  fetch.py             parallel httpx
-  html_dash.py         Grafana-inspired HTML
-  render.py            terminal
-  providers/
-    claude.py
-    codex.py
-    grok.py
+```bash
+pip install pytest
+pytest -q
 ```
 
-Grok path follows the approach documented by [CodexBar](https://github.com/steipete/CodexBar/blob/main/docs/grok.md) (`GetGrokCreditsConfig`), not the misleading monthly API credit counter.
+## Roadmap toward 10/10
 
-## Requirements
-
-- Python 3.10+
-- `httpx`, `PyYAML`
-- Local authenticated CLIs for the providers you enable
+- Optional Gemini / Cursor providers when stable local auth is available
+- Webhook / desktop notify on critical
+- Dashboard filters by family
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — [LICENSE](LICENSE)
 
 ## Disclaimer
 
-Not affiliated with Anthropic, OpenAI, or xAI. APIs and file layouts can change; treat this as a best-effort local helper.
+Unofficial. Not affiliated with Anthropic, OpenAI, or xAI. Undocumented APIs can change.
