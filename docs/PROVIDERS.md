@@ -20,6 +20,20 @@ Built-in families (register more via `register_provider` / `register_family`):
 - **Gemini API key** rarely exposes remaining %; OAuth path is preferred when available.
 - Env-only keys create a virtual `FAMILY/env` profile when no home is found.
 
+## Silent token refresh
+
+Short-lived access tokens expire independently of the subscription pool. Claude Code / Codex / Grok CLI silent-refresh via stored refresh tokens; the panel does the same before billing probes so idle homes do not look “dead” until the next interactive CLI run.
+
+| Family | Token store | Refresh endpoint |
+|--------|-------------|------------------|
+| **claude** | `~/.claude*/.credentials.json` → `claudeAiOauth` | `console.anthropic.com/v1/oauth/token` |
+| **codex** | `~/.codex*/auth.json` → `tokens` | `auth.openai.com/oauth/token` |
+| **grok** | `~/.grok*/auth.json` → OIDC entry | `{issuer}/oauth2/token` (default `auth.x.ai`) |
+
+Refresh rotates `refresh_token` when the IdP returns a new one; the panel writes it back atomically (`.panel-tmp` → replace). If refresh fails (`invalid_grant` / revoked), status stays AUTH/DEAD until `claude login` / `codex login` / `grok login`.
+
+**Not refreshed (by design):** API keys (OpenRouter, OpenAI key, Gemini key, Kimi key, `GH_TOKEN`) — they do not use this OIDC path. Gemini OAuth has no silent refresh here yet (re-login via Gemini CLI).
+
 ## Contract
 
 ```python

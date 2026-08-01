@@ -2,13 +2,18 @@
 
 NOT cli-chat-proxy /v1/billing monthly API credits (that was the 109% garbage).
 This is the gRPC-web endpoint that returns credit_usage_percent for the plan pool.
+
+OIDC access tokens (~6h) expire independently of SuperGrok; Grok CLI silent-refreshes
+via refresh_token. The panel must do the same — otherwise a valid session looks like
+"JWT истёк" until the next interactive `grok` run rewrites auth.json.
 """
 from __future__ import annotations
 
+import base64
 import json
 import struct
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
@@ -23,38 +28,173 @@ from panel.timefmt import (
 
 
 GRPC_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
+DEFAULT_OIDC_ISSUER = "https://auth.x.ai"
+DEFAULT_OIDC_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+# Refresh a bit before JWT exp so the next poll never hard-fails on clock skew.
+REFRESH_SKEW_S = 120.0
 
 
-def _read_auth(home: Path) -> Tuple[str, str, Optional[float], str]:
-    p = home / "auth.json"
+def _jwt_exp(token: str) -> Optional[float]:
+    if not token or token.count(".") != 2:
+        return None
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        if "exp" in claims:
+            return float(claims["exp"])
+    except Exception:
+        return None
+    return None
+
+
+def _auth_path(home: Path) -> Path:
+    return home / "auth.json"
+
+
+def _load_auth(home: Path) -> Tuple[dict[str, Any], str, dict[str, Any]]:
+    """Return (top-level auth.json dict, entry_key, entry) or empty structures."""
+    p = _auth_path(home)
     if not p.is_file():
-        return "", "", None, ""
+        return {}, "", {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
-        return "", "", None, ""
-    entry: dict[str, Any] = {}
-    for v in data.values():
-        if isinstance(v, dict) and v.get("key"):
-            entry = v
-            break
+        return {}, "", {}
+    if not isinstance(data, dict):
+        return {}, "", {}
+    for k, v in data.items():
+        if isinstance(v, dict) and (v.get("key") or v.get("refresh_token")):
+            return data, str(k), v
+    return data, "", {}
+
+
+def _read_auth(home: Path) -> Tuple[str, str, Optional[float], str, str]:
+    """key, email, exp, team_id, refresh_token."""
+    _, _, entry = _load_auth(home)
     if not entry:
-        return "", "", None, ""
+        return "", "", None, "", ""
     key = (entry.get("key") or "").strip()
     email = str(entry.get("email") or "")
-    exp: Optional[float] = None
-    if key.count(".") == 2:
-        try:
-            import base64
+    exp = _jwt_exp(key)
+    refresh = str(entry.get("refresh_token") or "").strip()
+    return key, email, exp, str(entry.get("team_id") or ""), refresh
 
-            payload = key.split(".")[1]
-            payload += "=" * (-len(payload) % 4)
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            if "exp" in claims:
-                exp = float(claims["exp"])
+
+def _token_endpoint(issuer: str) -> str:
+    iss = (issuer or DEFAULT_OIDC_ISSUER).rstrip("/")
+    # auth.x.ai and typical OIDC IdPs expose this well-known path; fall back to /oauth2/token.
+    return f"{iss}/oauth2/token"
+
+
+def _write_auth(home: Path, data: dict[str, Any]) -> None:
+    """Atomic replace of auth.json (refresh_token rotates — must not lose the new one)."""
+    p = _auth_path(home)
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    tmp = p.with_suffix(p.suffix + ".panel-tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(p)
+
+
+def _refresh_oidc(
+    home: Path, client: httpx.Client, timeout: float
+) -> Tuple[bool, str]:
+    """Silent OIDC refresh using stored refresh_token. Updates auth.json in place.
+
+    Returns (ok, detail). On success auth.json has a fresh access token (+ rotated refresh).
+    """
+    data, entry_key, entry = _load_auth(home)
+    if not entry or not entry_key:
+        return False, "no auth entry"
+    refresh = str(entry.get("refresh_token") or "").strip()
+    if not refresh:
+        return False, "no refresh_token"
+    client_id = str(
+        entry.get("oidc_client_id") or DEFAULT_OIDC_CLIENT_ID
+    ).strip()
+    issuer = str(entry.get("oidc_issuer") or DEFAULT_OIDC_ISSUER).strip()
+    url = _token_endpoint(issuer)
+    try:
+        resp = client.post(
+            url,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": client_id,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            timeout=timeout,
+        )
+    except Exception as e:
+        return False, f"refresh network: {type(e).__name__}"
+
+    if resp.status_code != 200:
+        detail = ""
+        try:
+            err = resp.json()
+            detail = str(err.get("error_description") or err.get("error") or "")
         except Exception:
-            pass
-    return key, email, exp, str(entry.get("team_id") or "")
+            detail = (resp.text or "")[:120]
+        return False, f"refresh HTTP {resp.status_code}" + (f": {detail}" if detail else "")
+
+    try:
+        body = resp.json()
+    except Exception:
+        return False, "refresh: bad JSON"
+    access = str(body.get("access_token") or "").strip()
+    if not access:
+        return False, "refresh: no access_token"
+    new_refresh = str(body.get("refresh_token") or "").strip() or refresh
+    expires_in = body.get("expires_in")
+    now = datetime.now(timezone.utc)
+    if expires_in is not None:
+        try:
+            exp_dt = now + timedelta(seconds=int(expires_in))
+            entry["expires_at"] = exp_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{exp_dt.microsecond:06d}Z"
+        except Exception:
+            entry["expires_at"] = now.isoformat().replace("+00:00", "Z")
+    entry["key"] = access
+    entry["refresh_token"] = new_refresh
+    entry["create_time"] = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond:06d}Z"
+    data[entry_key] = entry
+    try:
+        _write_auth(home, data)
+    except Exception as e:
+        return False, f"refresh write failed: {type(e).__name__}"
+    return True, "ok"
+
+
+def _ensure_fresh_token(
+    home: Path, client: httpx.Client, timeout: float
+) -> Tuple[str, str, Optional[float], str, Optional[str]]:
+    """Return key, email, exp, team; optional refresh note for meta.
+
+    Refreshes when JWT missing/expired or within REFRESH_SKEW_S of expiry.
+    """
+    key, email, exp, team, refresh = _read_auth(home)
+    now = time.time()
+    need = False
+    if not key:
+        need = bool(refresh)
+    elif exp is not None and exp <= now + REFRESH_SKEW_S:
+        need = bool(refresh)
+    note: Optional[str] = None
+    if need:
+        ok, detail = _refresh_oidc(home, client, timeout)
+        if ok:
+            key, email, exp, team, _ = _read_auth(home)
+            note = "oidc_refreshed"
+        else:
+            note = detail
+            # Keep using non-expired access token if refresh failed (e.g. revoked refresh).
+            if key and (exp is None or exp > now):
+                pass
+            else:
+                return key, email, exp, team, note
+    return key, email, exp, team, note
 
 
 def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
@@ -209,10 +349,12 @@ def fetch_grok(
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
-    key, email, exp, team = _read_auth(home)
+    key, email, exp, team, refresh_note = _ensure_fresh_token(home, client, timeout)
     r.email = email
     if team:
         r.meta["team_id"] = team
+    if refresh_note:
+        r.meta["auth_refresh"] = refresh_note
 
     if not key:
         r.status = Status.DEAD
@@ -222,30 +364,53 @@ def fetch_grok(
 
     now = time.time()
     if exp is not None and exp <= now:
+        # Refresh was attempted (if refresh_token existed) and still expired.
         r.status = Status.AUTH
         r.reason = "JWT истёк — grok login"
+        if refresh_note and refresh_note not in ("ok", "oidc_refreshed"):
+            r.reason = f"JWT истёк ({refresh_note})"
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
     # empty protobuf request framed for gRPC-web
     frame = bytes([0, 0, 0, 0, 0])
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/grpc-web+proto",
-        "Accept": "application/grpc-web+proto",
-        "X-Grpc-Web": "1",
-        "User-Agent": "grok-cli",
-        "Origin": "https://grok.com",
-        "Referer": "https://grok.com/",
-    }
+
+    def _post(bearer: str) -> httpx.Response:
+        headers = {
+            "Authorization": f"Bearer {bearer}",
+            "Content-Type": "application/grpc-web+proto",
+            "Accept": "application/grpc-web+proto",
+            "X-Grpc-Web": "1",
+            "User-Agent": "grok-cli",
+            "Origin": "https://grok.com",
+            "Referer": "https://grok.com/",
+        }
+        return client.post(GRPC_URL, headers=headers, content=frame, timeout=timeout)
 
     try:
-        resp = client.post(GRPC_URL, headers=headers, content=frame, timeout=timeout)
+        resp = _post(key)
     except Exception as e:
         r.status = Status.ERROR
         r.reason = f"сеть: {type(e).__name__}"
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
+
+    if resp.status_code in (401, 403):
+        # Access rejected — try one forced refresh even if JWT exp looked fine.
+        ok, detail = _refresh_oidc(home, client, timeout)
+        r.meta["auth_refresh"] = "oidc_refreshed" if ok else detail
+        if ok:
+            key, email, exp, team, _ = _read_auth(home)
+            r.email = email or r.email
+            if team:
+                r.meta["team_id"] = team
+            try:
+                resp = _post(key)
+            except Exception as e:
+                r.status = Status.ERROR
+                r.reason = f"сеть: {type(e).__name__}"
+                r.latency_ms = (time.perf_counter() - t0) * 1000
+                return r
 
     if resp.status_code in (401, 403):
         r.status = Status.AUTH
