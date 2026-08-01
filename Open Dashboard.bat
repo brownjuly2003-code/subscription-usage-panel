@@ -1,5 +1,11 @@
 @echo off
-:: Double-click: refresh subscription data and open dashboard.html
+:: Refresh silently (no flash) then open dashboard.html
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-dashboard.ps1"
-if errorlevel 1 pause
+if not exist ".cache" mkdir ".cache" >nul 2>&1
+wscript //B //Nologo "%~dp0refresh-quiet.vbs"
+if errorlevel 1 (
+  echo Refresh failed. Is Python installed?
+  pause
+  exit /b 1
+)
+start "" "%~dp0dashboard.html"

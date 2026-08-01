@@ -138,8 +138,20 @@ function Stop-Server {
 
 function Install-RefreshSchedule {
     if ($EveryMinutes -lt 5) { $EveryMinutes = 5 }
-    $arg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ThisScript`" -Quiet"
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $Root
+    $cacheDir = Join-Path $Root ".cache"
+    if (-not (Test-Path -LiteralPath $cacheDir)) {
+        New-Item -ItemType Directory -Path $cacheDir | Out-Null
+    }
+    # wscript + VBS + pythonw = no console window flash (powershell -WindowStyle Hidden still flashes)
+    $vbs = Join-Path $Root "refresh-quiet.vbs"
+    if (-not (Test-Path -LiteralPath $vbs)) {
+        throw "Missing refresh-quiet.vbs (silent refresher)"
+    }
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $action = New-ScheduledTaskAction `
+        -Execute $wscript `
+        -Argument "//B //Nologo `"$vbs`"" `
+        -WorkingDirectory $Root
     $tLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $tRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes) `
@@ -150,14 +162,23 @@ function Install-RefreshSchedule {
         -StartWhenAvailable `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
         -MultipleInstances IgnoreNew
+    # Hide from Task Scheduler UI noise where supported
+    try { $settings.Hidden = $true } catch { }
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
     Register-ScheduledTask -TaskName $TaskName `
         -Action $action `
         -Trigger @($tLogon, $tRepeat) `
         -Settings $settings `
         -Principal $principal `
-        -Description "Refresh Panel dashboard.html every $EveryMinutes min" `
+        -Description "Silent refresh of Panel dashboard.html every $EveryMinutes min (no window)" `
         -Force | Out-Null
+
+    # Ensure Hidden sticks on PS 5.1
+    try {
+        $t = Get-ScheduledTask -TaskName $TaskName
+        $t.Settings.Hidden = $true
+        Set-ScheduledTask -InputObject $t | Out-Null
+    } catch { }
 
     $old = Get-ScheduledTask -TaskName "SubscriptionUsagePanel" -ErrorAction SilentlyContinue
     if ($old) {
@@ -166,7 +187,7 @@ function Install-RefreshSchedule {
     }
 
     if (-not $Quiet) {
-        Write-Host "OK: dashboard.html refreshes every $EveryMinutes min and at logon."
+        Write-Host "OK: silent auto-refresh every $EveryMinutes min (no popup windows)."
         Write-Host "Open: $HtmlPath"
         Write-Host "Or double-click: Open Dashboard.bat"
     }
