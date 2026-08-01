@@ -937,15 +937,16 @@ def render_dashboard_html(
             <span class="ico">⏱</span>
             {_esc(now)}
           </div>
-          {f'<span class="gf-btn"><span class="live-dot"></span>Live · {int(poll_seconds)}s</span>' if live else '<span class="gf-btn">Snapshot</span>'}
+          {f'<span class="gf-btn"><span class="live-dot"></span>{"Live" if live else "Auto"} · {int(poll_seconds)}s</span>'}
         </div>
       </div>
 
       {"" if live else f'''
       <div id="snapBanner" style="margin:0 16px 8px;padding:8px 12px;border-radius:4px;border:1px solid var(--gf-border-weak);background:var(--gf-primary-bg);color:var(--gf-text-secondary);font-size:12px;">
-        Updated <b style="color:var(--gf-text-primary)">{_esc(now)}</b>
-        · double-click <code>Open Dashboard.bat</code> for a fresh pull
-        · auto-refresh: <code>.\\open-dashboard.ps1 -Install</code>
+        Data as of <b style="color:var(--gf-text-primary)">{_esc(now)}</b>
+        · page reloads every {int(poll_seconds)}s
+        · background job rewrites this file (Install schedule)
+        · instant pull: <code>Open Dashboard.bat</code>
       </div>
       '''}
 
@@ -963,7 +964,7 @@ def render_dashboard_html(
       </div>
 
       <div class="page-footer">
-        {"Auto-refresh page (local server)." if live else "Open Dashboard.bat · or scheduled refresh via open-dashboard.ps1 -Install"}
+        {"Live server: re-fetch + reload." if live else f"Auto-reload every {int(poll_seconds)}s (re-reads dashboard.html from disk)."}
       </div>
     </div>
   </div>
@@ -994,9 +995,14 @@ def render_dashboard_html(
         apply(cur === "dark" ? "light" : "dark");
       }});
     }}
-    // Live mode: reload page on interval (server re-renders HTML with fresh data)
-    if (LIVE && POLL > 0) {{
+    // Auto-reload: live server re-renders HTML; snapshot re-reads file from disk
+    // (data on disk is refreshed by scheduled refresh-quiet.vbs / Open Dashboard.bat)
+    if (POLL > 0) {{
       setInterval(function () {{
+        if (location.protocol === "file:") {{
+          location.reload();
+          return;
+        }}
         var t = root.getAttribute("data-theme") || "dark";
         var u = new URL(window.location.href);
         u.searchParams.set("theme", t);

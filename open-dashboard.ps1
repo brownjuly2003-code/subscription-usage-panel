@@ -19,7 +19,7 @@ param(
     [switch]$Quiet,
     [int]$Port = 8765,
     [string]$BindHost = "127.0.0.1",
-    [int]$EveryMinutes = 10
+    [int]$EveryMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"
