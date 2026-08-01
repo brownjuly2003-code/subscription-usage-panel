@@ -179,6 +179,7 @@ def render_dashboard_html(
     live: bool = False,
     poll_seconds: int = 60,
     payload: dict | None = None,
+    live_port: int = 8765,
 ) -> str:
     from panel.history import attach_history, append_snapshot
     from panel.schema import build_payload
@@ -940,6 +941,14 @@ def render_dashboard_html(
         </div>
       </div>
 
+      {"" if live else f'''
+      <div id="snapBanner" style="margin:0 16px 8px;padding:8px 12px;border-radius:4px;border:1px solid var(--gf-border-weak);background:var(--gf-primary-bg);color:var(--gf-text-secondary);font-size:12px;">
+        Updated <b style="color:var(--gf-text-primary)">{_esc(now)}</b>
+        · double-click <code>Open Dashboard.bat</code> for a fresh pull
+        · auto-refresh: <code>.\\open-dashboard.ps1 -Install</code>
+      </div>
+      '''}
+
       <div class="dashboard">
         <div class="filter-bar">
           <button type="button" class="chip chip-filter active" data-family="*">all</button>
@@ -954,8 +963,7 @@ def render_dashboard_html(
       </div>
 
       <div class="page-footer">
-        Static Grafana-style snapshot (no Grafana server). Refresh data:
-        <code>python D:\\Panel\\limits.py --html --open</code>
+        {"Auto-refresh page (local server)." if live else "Open Dashboard.bat · or scheduled refresh via open-dashboard.ps1 -Install"}
       </div>
     </div>
   </div>
@@ -965,6 +973,7 @@ def render_dashboard_html(
     var KEY = "subscription-usage-panel-theme";
     var LIVE = {str(live).lower()};
     var POLL = {int(poll_seconds)};
+    var LIVE_PORT = {int(live_port)};
     var root = document.documentElement;
     var btn = document.getElementById("themeToggle");
     var label = document.getElementById("themeLabel");
@@ -1066,8 +1075,17 @@ def write_dashboard(
     wall_ms: float,
     path,
     theme: str = "dark",
+    live_hint_port: int = 8765,
+    payload: dict | None = None,
 ) -> None:
     path.write_text(
-        render_dashboard_html(results, wall_ms, theme=theme, live=False),
+        render_dashboard_html(
+            results,
+            wall_ms,
+            theme=theme,
+            live=False,
+            live_port=live_hint_port,
+            payload=payload,
+        ),
         encoding="utf-8",
     )

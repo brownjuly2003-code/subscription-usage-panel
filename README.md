@@ -33,11 +33,21 @@ pip install -r requirements.txt
 ```bash
 python limits.py --list-profiles
 python limits.py
-python limits.py --html --open
-python limits.py --serve --open          # live dashboard
+python limits.py --html --open           # one-shot snapshot → dashboard.html
 python limits.py --json                  # schema sup.v1
 python limits.py --strict-exit           # CI hooks
 ```
+
+### Windows (convenient)
+
+```powershell
+# Double-click "Open Dashboard.bat"  OR:
+.\open-dashboard.ps1                     # fetch now → open dashboard.html
+.\open-dashboard.ps1 -Install            # auto-refresh HTML every 10 min + at logon
+.\open-dashboard.ps1 -Live               # optional: local server auto-refresh in browser
+```
+
+No permanent server is required for normal use: scheduled task rewrites `dashboard.html`.
 
 ### Filters (for huge fleets)
 
@@ -91,15 +101,16 @@ For each catalog family, scans:
 - Absolute **reset date once** + relative once
 - History-based sparkline when `.cache/history` has points; otherwise honest bar
 
-### Live server
+### Live server (optional)
 
 ```bash
 python limits.py --serve --open --port 8765 --workers 32
+# or: .\open-dashboard.ps1 -Live
 ```
 
 | URL | |
 |-----|--|
-| `/` | Live HTML (auto-refresh) |
+| `/` | Live HTML (auto-refresh); also rewrites on-disk `dashboard.html` |
 | `/api/usage` | `sup.v1` JSON |
 | `/api/refresh` | Force re-fetch |
 | `/api/health` | Health |
