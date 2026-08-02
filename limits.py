@@ -102,6 +102,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="parallel fetch workers (default 16, max 64)",
     )
+    p.add_argument(
+        "--heal-grok",
+        action="store_true",
+        help=(
+            "safe browser OIDC heal for Grok homes with dead refresh_token "
+            "(does not wipe auth.json until success)"
+        ),
+    )
+    p.add_argument(
+        "--chrome-profile",
+        default="Default",
+        help="Chrome profile directory for --heal-grok (default: Default)",
+    )
     return p.parse_args(argv)
 
 
@@ -213,6 +226,53 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"families: {', '.join(fams)}")
         return 0
+
+    if args.heal_grok:
+        from panel.providers.grok_heal import heal_grok_home
+        from panel.providers import grok as grok_mod
+        import httpx
+
+        homes = [p.home for p in cfg.profiles if p.family == "grok" and p.enabled]
+        if not homes:
+            print("no grok profiles")
+            return 1
+        rc = 0
+        for home in homes:
+            key, email, exp, team, refresh = grok_mod._read_auth(home)
+            need = False
+            reason = "healthy"
+            if not refresh:
+                need, reason = True, "no refresh_token"
+            elif grok_mod._is_rt_marked_dead(home, refresh):
+                need, reason = True, "rt marked dead"
+            else:
+                with httpx.Client(timeout=15.0) as client:
+                    # Diagnose without rotating a good RT if access is still long-lived.
+                    now = time.time()
+                    if exp is not None and exp > now + 3600:
+                        reason = "access still fresh; skip force-refresh"
+                    else:
+                        ok, detail = grok_mod._refresh_oidc(home, client, 12.0)
+                        if ok:
+                            reason = f"refresh ok ({detail})"
+                        elif grok_mod._refresh_looks_revoked(detail):
+                            need, reason = True, detail
+                        else:
+                            need, reason = True, detail
+            print(f"GROK {home}: {reason}")
+            if not need:
+                continue
+            print(f"  → opening browser OIDC heal (profile={args.chrome_profile})…")
+            ok, detail = heal_grok_home(
+                home,
+                timeout_s=240.0,
+                chrome_profile=args.chrome_profile or "Default",
+                open_browser=True,
+            )
+            print(f"  → {'OK' if ok else 'FAIL'}: {detail}")
+            if not ok:
+                rc = 1
+        return rc
 
     if args.serve:
         from panel.server import serve
