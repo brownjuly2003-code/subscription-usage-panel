@@ -32,7 +32,9 @@ Short-lived access tokens expire independently of the subscription pool. Claude 
 
 Refresh rotates `refresh_token` when the IdP returns a new one; the panel writes it back atomically (`.panel-tmp` → replace). If refresh fails (`invalid_grant` / revoked), status stays AUTH/DEAD until `claude login` / `codex login` / `grok login`.
 
-**Grok race safety:** rotating refresh tokens + concurrent panel/CLI refresh used to burn sessions (`Refresh token has been revoked`). The panel now takes the same advisory `auth.json.lock` (`{pid}:{unix_ts}`) as Grok CLI, re-reads under the lock, and on `invalid_grant` accepts a peer-written fresh JWT. Last good SuperGrok pool is cached in `~/.grok*/.panel-grok-usage.json` so a dead RT shows **STALE** numbers instead of a blank card until you re-login once.
+**Grok race safety:** rotating refresh tokens + concurrent panel/CLI refresh used to burn sessions (`Refresh token has been revoked`). The panel now takes the same advisory `auth.json.lock` (`{pid}:{unix_ts}`) as Grok CLI, re-reads under the lock, and on `invalid_grant` accepts a peer-written fresh JWT.
+
+**No-login dashboard:** if the IdP revokes `refresh_token`, the panel marks it in `~/.grok*/.panel-rt-dead.json` (stops hammering oauth), rides the access JWT until it expires, then shows **STALE** SuperGrok % from `~/.grok*/.panel-grok-usage.json`. Cards stay populated without `grok login`. Live auto-refresh resumes automatically when `auth.json` gets a new RT (CLI/login elsewhere).
 
 **Not refreshed (by design):** API keys (OpenRouter, OpenAI key, Gemini key, Kimi key, `GH_TOKEN`) — they do not use this OIDC path. Gemini OAuth has no silent refresh here yet (re-login via Gemini CLI).
 

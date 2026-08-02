@@ -104,12 +104,12 @@ def build_payload(
                     "message": f"{r.label}: {rem:.1f}% remaining",
                 }
             )
-        elif r.status in (Status.AUTH, Status.DEAD, Status.STALE) and r.family in (
+        elif r.status in (Status.AUTH, Status.DEAD) and r.family in (
             "claude",
             "codex",
             "grok",
         ):
-            # only alert offline if it looks like a main account with a reason
+            # STALE-with-windows is intentional (last known) — not an offline alert.
             if r.reason:
                 alerts.append(
                     {
@@ -121,30 +121,19 @@ def build_payload(
                         "message": f"{r.label}: {r.reason}",
                     }
                 )
-        # Grok/Claude: live probe but refresh_token already dead — warn before blank.
-        auth_note = str((r.meta or {}).get("auth_refresh") or "")
-        if (
-            r.status == Status.LIVE
-            and r.family == "grok"
-            and auth_note
-            and (
-                "revoked" in auth_note.lower()
-                or "invalid_grant" in auth_note.lower()
-            )
-        ):
-            alerts.append(
-                {
-                    "level": "warn",
-                    "profile_id": r.id,
-                    "label": r.label,
-                    "remaining_pct": rem,
-                    "reset_at": pw.reset_at if pw else None,
-                    "message": (
-                        f"{r.label}: refresh_token мёртв — сделай grok login "
-                        f"пока JWT жив ({(r.meta or {}).get('token_left') or '?'})"
-                    ),
-                }
-            )
+        elif r.status == Status.STALE and r.family == "grok" and rem is None:
+            # Grok STALE without numbers — only then surface offline.
+            if r.reason:
+                alerts.append(
+                    {
+                        "level": "offline",
+                        "profile_id": r.id,
+                        "label": r.label,
+                        "remaining_pct": None,
+                        "reset_at": None,
+                        "message": f"{r.label}: {r.reason}",
+                    }
+                )
 
     # sort profiles: critical first among live, then by remaining
     def sort_key(p: dict) -> tuple:

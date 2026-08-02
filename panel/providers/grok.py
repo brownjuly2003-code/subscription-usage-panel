@@ -43,6 +43,10 @@ REFRESH_SKEW_S = 3600.0
 LOCK_STALE_S = 45.0
 LOCK_WAIT_S = 12.0
 USAGE_CACHE_NAME = ".panel-grok-usage.json"
+# When IdP revokes refresh_token, stop hammering oauth2/token. Panel keeps LIVE
+# while access JWT works, then STALE from usage cache — no re-login required for
+# the dashboard to show SuperGrok remaining.
+RT_DEAD_NAME = ".panel-rt-dead.json"
 
 
 def _jwt_exp(token: str) -> Optional[float]:
@@ -329,12 +333,78 @@ def _refresh_oidc(
         return True, "ok"
 
 
+def _rt_fingerprint(refresh: str) -> str:
+    """Short stable id for the current refresh_token (not secret-bearing)."""
+    import hashlib
+
+    if not refresh:
+        return ""
+    return hashlib.sha256(refresh.encode("utf-8")).hexdigest()[:16]
+
+
+def _rt_dead_path(home: Path) -> Path:
+    return home / RT_DEAD_NAME
+
+
+def _is_rt_marked_dead(home: Path, refresh: str) -> bool:
+    fp = _rt_fingerprint(refresh)
+    if not fp:
+        return False
+    p = _rt_dead_path(home)
+    if not p.is_file():
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return str(data.get("rt_fp") or "") == fp
+
+
+def _mark_rt_dead(home: Path, refresh: str, detail: str) -> None:
+    fp = _rt_fingerprint(refresh)
+    if not fp:
+        return
+    payload = {
+        "rt_fp": fp,
+        "detail": (detail or "")[:200],
+        "marked_at": time.time(),
+    }
+    try:
+        p = _rt_dead_path(home)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def _clear_rt_dead(home: Path) -> None:
+    try:
+        _rt_dead_path(home).unlink(missing_ok=True)  # type: ignore[call-arg]
+    except TypeError:
+        try:
+            p = _rt_dead_path(home)
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def _refresh_looks_revoked(detail: str) -> bool:
+    d = (detail or "").lower()
+    return "revoked" in d or "invalid_grant" in d
+
+
 def _ensure_fresh_token(
     home: Path, client: httpx.Client, timeout: float
 ) -> Tuple[str, str, Optional[float], str, Optional[str]]:
     """Return key, email, exp, team; optional refresh note for meta.
 
     Refreshes when JWT missing/expired or within REFRESH_SKEW_S of expiry.
+    If refresh_token was already revoked, skip IdP calls and ride the access
+    JWT until it dies — then caller falls back to STALE usage cache (no login).
     """
     key, email, exp, team, refresh = _read_auth(home)
     now = time.time()
@@ -345,9 +415,16 @@ def _ensure_fresh_token(
         need = bool(refresh)
     note: Optional[str] = None
     if need:
+        if refresh and _is_rt_marked_dead(home, refresh):
+            note = "rt_dead_cached"
+            # Keep non-expired access; otherwise empty key path → STALE.
+            if key and (exp is None or exp > now):
+                return key, email, exp, team, note
+            return key, email, exp, team, note
         ok, detail = _refresh_oidc(home, client, timeout)
-        key, email, exp, team, _ = _read_auth(home)
+        key, email, exp, team, refresh2 = _read_auth(home)
         if ok:
+            _clear_rt_dead(home)
             # already_fresh / peer_* also count as ok for the probe path.
             note = (
                 "oidc_refreshed"
@@ -356,6 +433,8 @@ def _ensure_fresh_token(
             )
         else:
             note = detail
+            if _refresh_looks_revoked(detail) and (refresh or refresh2):
+                _mark_rt_dead(home, refresh2 or refresh, detail)
             # Keep using non-expired access token if refresh failed (e.g. revoked refresh).
             if key and (exp is None or exp > now):
                 pass
@@ -591,22 +670,24 @@ def fetch_grok(
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
-    def _maybe_stale(reason: str) -> None:
-        """Keep last known SuperGrok pool on the card instead of blank AUTH/DEAD."""
+    def _maybe_stale(reason: str) -> bool:
+        """Keep last known SuperGrok pool on the card — dashboard needs no re-login."""
         cache = _load_usage_cache(home)
         if not cache:
-            return
+            return False
         try:
             r.windows = _windows_from_cache(cache)
         except Exception:
-            return
+            return False
         r.status = Status.STALE
-        r.reason = reason
+        # Calm copy: panel stays useful without interactive login.
+        r.reason = reason or "last known (session idle)"
         r.plan = r.plan or "SuperGrok"
         if not r.email and cache.get("email"):
             r.email = str(cache["email"])
         r.meta["source"] = "local .panel-grok-usage.json (not live)"
         r.meta["cache_reason"] = reason
+        return True
 
     key, email, exp, team, refresh_note = _ensure_fresh_token(home, client, timeout)
     r.email = email
@@ -614,29 +695,36 @@ def fetch_grok(
         r.meta["team_id"] = team
     if refresh_note:
         r.meta["auth_refresh"] = refresh_note
+        if refresh_note in ("rt_dead_cached",) or _refresh_looks_revoked(
+            refresh_note or ""
+        ):
+            r.meta["rt_refresh"] = "paused"
 
     if not key:
         r.status = Status.DEAD
-        r.reason = "нет OIDC (grok login)"
-        if refresh_note and refresh_note not in (
-            "ok",
-            "oidc_refreshed",
-            "already_fresh",
-            "peer_refreshed",
-            "peer_lock_fresh",
-            "peer_lock_access_ok",
-        ):
-            r.reason = f"нет OIDC ({refresh_note})"
-        _maybe_stale(r.reason)
+        r.reason = "нет OIDC-токена"
+        if not _maybe_stale("last known · no access token"):
+            if refresh_note and refresh_note not in (
+                "ok",
+                "oidc_refreshed",
+                "already_fresh",
+                "peer_refreshed",
+                "peer_lock_fresh",
+                "peer_lock_access_ok",
+            ):
+                r.reason = f"нет OIDC-токена ({refresh_note})"
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
     now = time.time()
     if exp is not None and exp <= now:
-        # Refresh was attempted (if refresh_token existed) and still expired.
+        # Access JWT gone. Prefer STALE cache over AUTH/login nag.
         r.status = Status.AUTH
-        r.reason = "JWT истёк — grok login"
-        if refresh_note and refresh_note not in (
+        if refresh_note in ("rt_dead_cached",) or _refresh_looks_revoked(
+            refresh_note or ""
+        ):
+            r.reason = "session idle · last known"
+        elif refresh_note and refresh_note not in (
             "ok",
             "oidc_refreshed",
             "already_fresh",
@@ -644,11 +732,9 @@ def fetch_grok(
             "peer_lock_fresh",
             "peer_lock_access_ok",
         ):
-            # Surface revoked RT clearly — user must re-login once.
-            if "revoked" in refresh_note.lower() or "invalid_grant" in refresh_note.lower():
-                r.reason = "refresh_token revoked — grok login"
-            else:
-                r.reason = f"JWT истёк ({refresh_note})"
+            r.reason = f"JWT истёк ({refresh_note})"
+        else:
+            r.reason = "JWT истёк"
         _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
@@ -701,7 +787,7 @@ def fetch_grok(
 
     if resp.status_code in (401, 403):
         r.status = Status.AUTH
-        r.reason = "auth rejected — grok login"
+        r.reason = "auth rejected · last known"
         _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r

@@ -180,8 +180,57 @@ def test_stale_usage_cache_on_auth_failure(tmp_path: Path) -> None:
     assert r.status == Status.STALE
     assert r.windows
     assert abs(r.windows[0].rem_pct - 60.0) < 1e-6
-    assert "OIDC" in (r.reason or "") or "login" in (r.reason or "").lower()
+    assert "last known" in (r.reason or "").lower()
+    assert "login" not in (r.reason or "").lower()
     assert r.meta.get("source", "").startswith("local")
+
+
+def test_revoked_rt_marked_and_not_rehit(tmp_path: Path) -> None:
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() + 30, refresh="rt-dead")
+    client = MagicMock(spec=httpx.Client)
+    bad = MagicMock()
+    bad.status_code = 400
+    bad.json.return_value = {
+        "error": "invalid_grant",
+        "error_description": "Refresh token has been revoked",
+    }
+    bad.text = "revoked"
+    client.post.return_value = bad
+
+    key1, _, _, _, note1 = grok_mod._ensure_fresh_token(home, client, 5.0)
+    assert key1
+    assert note1 and "revoked" in note1
+    assert (home / grok_mod.RT_DEAD_NAME).is_file()
+    assert client.post.call_count == 1
+
+    # Second ensure within skew must NOT call IdP again.
+    key2, _, _, _, note2 = grok_mod._ensure_fresh_token(home, client, 5.0)
+    assert key2
+    assert note2 == "rt_dead_cached"
+    assert client.post.call_count == 1
+
+
+def test_stale_after_dead_jwt_no_login_nag(tmp_path: Path) -> None:
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() - 10, refresh="rt-dead")
+    end = time.time() + 3 * 86400
+    grok_mod._save_usage_cache(
+        home,
+        used_pct=25.0,
+        rem_pct=75.0,
+        period_label="7d",
+        period_start=end - 7 * 86400,
+        period_end=end,
+        email="t@example.com",
+    )
+    grok_mod._mark_rt_dead(home, "rt-dead", "revoked")
+    client = MagicMock(spec=httpx.Client)
+    r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
+    assert r.status == Status.STALE
+    assert r.windows and abs(r.windows[0].rem_pct - 75.0) < 1e-6
+    assert "login" not in (r.reason or "").lower()
+    client.post.assert_not_called()
 
 
 def test_auth_lock_format_matches_cli(tmp_path: Path) -> None:
