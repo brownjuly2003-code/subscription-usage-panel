@@ -145,14 +145,22 @@ def _apply_tokens(
     grok_mod._clear_rt_dead(home)
 
 
+# Stable callback port so one heal process owns redirects (no port spam).
+HEAL_CALLBACK_PORT = 18765
+
+
 def heal_grok_home(
     home: Path,
     *,
-    timeout_s: float = 180.0,
+    timeout_s: float = 300.0,
     chrome_profile: Optional[str] = "Default",
     open_browser: bool = True,
 ) -> Tuple[bool, str]:
     """Run OIDC auth-code + PKCE for one Grok home. Safe: keeps old auth until success.
+
+    ONE browser window only. Callback server stays up for the whole timeout so a
+    completed Google login actually lands (earlier multi-heal spam killed listeners
+    → user clicked forever into dead ports).
 
     Returns (ok, detail).
     """
@@ -163,10 +171,21 @@ def heal_grok_home(
     client_id = grok_mod.DEFAULT_OIDC_CLIENT_ID
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(24)
-    port = _free_port()
+
+    # Prefer fixed port so we never open N random-callback windows.
+    port = HEAL_CALLBACK_PORT
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", port))
+        probe.close()
+    except OSError:
+        port = _free_port()
+        print(
+            f"  note: port {HEAL_CALLBACK_PORT} busy → using {port}",
+            flush=True,
+        )
     redirect = f"http://127.0.0.1:{port}/callback"
 
-    # login_hint + prompt=none first: if Chrome still has x.ai SSO, no UI click.
     login_hint = ""
     try:
         _, email0, _, _, _ = grok_mod._read_auth(home)
@@ -188,15 +207,29 @@ def heal_grok_home(
     if login_hint:
         params["login_hint"] = login_hint
     auth_url = f"{issuer}/oauth2/authorize?" + urllib.parse.urlencode(params)
-    # Prefer silent SSO when browser session exists.
-    silent_params = dict(params)
-    silent_params["prompt"] = "none"
-    silent_url = f"{issuer}/oauth2/authorize?" + urllib.parse.urlencode(silent_params)
+    print(f"  ONE window only. Callback LIVE on {redirect}", flush=True)
+    print(f"  Success = green page «Grok auth OK». Connection refused = click was wasted.", flush=True)
     print(f"  OAuth URL:\n  {auth_url}", flush=True)
-    print(f"  callback: {redirect}", flush=True)
 
     result: dict[str, Any] = {"code": None, "error": None, "state": None}
     done = threading.Event()
+    status_path = Path(__file__).resolve().parents[2] / ".cache" / "heal-status.json"
+    try:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    def _write_status(phase: str, **extra: Any) -> None:
+        payload = {"phase": phase, "ts": time.time(), "home": str(home), **extra}
+        try:
+            status_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    _write_status("waiting_browser", callback=redirect)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
@@ -204,22 +237,56 @@ def heal_grok_home(
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
-            if parsed.path != "/callback":
+            if parsed.path not in ("/callback", "/"):
                 self.send_response(404)
                 self.end_headers()
                 return
             q = urllib.parse.parse_qs(parsed.query)
+            if parsed.path == "/":
+                html = (
+                    "<html><body style='font-family:system-ui;padding:2rem'>"
+                    "<h2>Panel heal listener is UP</h2>"
+                    "<p>Complete Google sign-in in the other tab. "
+                    "Success page title: Grok auth OK.</p></body></html>"
+                )
+                body = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             result["code"] = (q.get("code") or [None])[0]
             result["error"] = (q.get("error") or [None])[0]
             result["state"] = (q.get("state") or [None])[0]
-            body = (
-                b"<html><body style='font-family:system-ui;padding:2rem'>"
-                b"<h2>Grok auth OK</h2><p>You can close this tab. Panel will resume live limits.</p>"
-                b"</body></html>"
-                if result["code"]
-                else b"<html><body><h2>Auth failed</h2></body></html>"
+            print(
+                f"  callback hit: code={'yes' if result['code'] else 'no'} "
+                f"error={result['error']!r}",
+                flush=True,
             )
-            self.send_response(200 if result["code"] else 400)
+            _write_status(
+                "callback",
+                has_code=bool(result["code"]),
+                error=result["error"],
+            )
+            ok_page = bool(result["code"]) and not result["error"]
+            if ok_page:
+                html = (
+                    "<html><body style='font-family:system-ui;padding:2rem;"
+                    "background:#0a0;color:#fff'>"
+                    "<h1>Grok auth OK</h1>"
+                    "<p>Close this tab. Panel is saving tokens now.</p>"
+                    "</body></html>"
+                )
+            else:
+                err = str(result["error"] or "no code")
+                html = (
+                    "<html><body style='font-family:system-ui;padding:2rem;"
+                    "background:#a00;color:#fff'>"
+                    f"<h1>Auth failed</h1><p>{err}</p></body></html>"
+                )
+            body = html.encode("utf-8")
+            self.send_response(200 if ok_page else 400)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -230,24 +297,26 @@ def heal_grok_home(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        # ONE browser open only (no silent+interactive double windows).
         if open_browser:
-            # 1) silent SSO (no UI if session cookie present)
-            _open_authorize_url(silent_url, chrome_profile=chrome_profile)
-            if done.wait(12.0):
-                pass  # got callback from silent
-            elif not done.is_set():
-                # 2) interactive authorize
-                print("  silent SSO did not complete — opening interactive auth…", flush=True)
-                _open_authorize_url(auth_url, chrome_profile=chrome_profile)
+            _open_authorize_url(auth_url, chrome_profile=chrome_profile)
+            print("  browser opened once — waiting for callback…", flush=True)
         if not done.wait(timeout_s):
-            return False, f"timeout waiting for browser auth ({int(timeout_s)}s)"
+            _write_status("timeout")
+            return False, (
+                f"timeout ({int(timeout_s)}s) — callback never hit {redirect}. "
+                f"If you only saw x.ai/Google pages without green «Grok auth OK», "
+                f"the listener was already dead (old multi-window spam)."
+            )
         if result.get("error"):
+            _write_status("oauth_error", error=result["error"])
             return False, f"oauth error: {result['error']}"
         if result.get("state") != state:
             return False, "oauth state mismatch"
         code = result.get("code")
         if not code:
             return False, "no authorization code"
+        print("  exchanging code for tokens…", flush=True)
 
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(
@@ -309,22 +378,27 @@ def heal_grok_home(
         # verify refresh works once
         with httpx.Client(timeout=20.0) as client:
             ok, detail = grok_mod._refresh_oidc(home, client, 15.0)
-            if not ok and not grok_mod._refresh_looks_revoked(detail):
-                # access may still be fresh → already_fresh expected after just minting
-                if detail != "already_fresh":
-                    # not fatal if access works for billing
-                    pass
             key, email, exp, team, rt = grok_mod._read_auth(home)
             if not key or not rt:
+                _write_status("incomplete")
                 return False, "auth written but incomplete"
             # force a billing probe
             r = grok_mod.fetch_grok("heal", "heal", home, client, 15.0)
             if r.status.value != "live":
-                return (
-                    True,
-                    f"tokens saved (email={email}) but billing={r.status.value}: {r.reason}",
+                msg = (
+                    f"tokens saved (email={email}) refresh={detail} "
+                    f"but billing={r.status.value}: {r.reason}"
                 )
-            return True, f"live ok email={email} rem={[round(w.rem_pct,1) for w in r.windows]}"
+                _write_status("tokens_saved", detail=msg)
+                return True, msg
+            msg = (
+                f"live ok email={email} "
+                f"rem={[round(w.rem_pct, 1) for w in r.windows]} "
+                f"refresh={detail}"
+            )
+            _write_status("ok", detail=msg)
+            print(f"  SUCCESS: {msg}", flush=True)
+            return True, msg
     finally:
         try:
             server.shutdown()
