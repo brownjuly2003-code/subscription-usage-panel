@@ -8,9 +8,16 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 
 from panel.models import Status
 from panel.providers import grok as grok_mod
+
+
+@pytest.fixture(autouse=True)
+def _allow_panel_oidc(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unit tests have no grok.exe; force panel OIDC path explicitly.
+    monkeypatch.setenv("PANEL_GROK_OIDC_REFRESH", "1")
 
 
 def _fake_jwt(exp: float) -> str:

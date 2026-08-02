@@ -36,17 +36,19 @@ from panel.timefmt import (
 GRPC_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
 DEFAULT_OIDC_ISSUER = "https://auth.x.ai"
 DEFAULT_OIDC_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
-# Refresh in the last hour of JWT life (~6h). Short skew left revoked RTs
-# undiscovered until the card went blank; locking makes early rotate safe vs CLI.
-REFRESH_SKEW_S = 3600.0
+# Only treat token as needing refresh when almost dead. Panel must NOT race the
+# CLI for rotating refresh_tokens (that burned personal RT). Prefer CLI as sole writer.
+REFRESH_SKEW_S = 180.0
 # Grok CLI writes `auth.json.lock` as `{pid}:{unix_ts}`. Stale locks are broken.
 LOCK_STALE_S = 45.0
 LOCK_WAIT_S = 12.0
 USAGE_CACHE_NAME = ".panel-grok-usage.json"
 # When IdP revokes refresh_token, stop hammering oauth2/token. Panel keeps LIVE
-# while access JWT works, then STALE from usage cache — no re-login required for
-# the dashboard to show SuperGrok remaining.
+# while access JWT works, then STALE from usage cache.
 RT_DEAD_NAME = ".panel-rt-dead.json"
+# Panel OIDC write is OFF by default when grok.exe exists (CLI owns auth.json).
+# Set PANEL_GROK_OIDC_REFRESH=1 to force panel-side OIDC (tests / emergency).
+_ENV_OIDC = "PANEL_GROK_OIDC_REFRESH"
 
 
 def _jwt_exp(token: str) -> Optional[float]:
@@ -397,35 +399,111 @@ def _refresh_looks_revoked(detail: str) -> bool:
     return "revoked" in d or "invalid_grant" in d
 
 
+def _grok_exe(home: Path) -> Optional[Path]:
+    for p in (home / "bin" / "grok.exe", home / "bin" / "grok"):
+        if p.is_file():
+            return p
+    return None
+
+
+def _panel_oidc_allowed(home: Path) -> bool:
+    """Whether panel may write auth.json via OIDC.
+
+    Default: NO if this home has grok CLI (CLI is the sole token writer).
+    Tests / emergency: PANEL_GROK_OIDC_REFRESH=1.
+    """
+    flag = (os.environ.get(_ENV_OIDC) or "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    if flag in ("0", "false", "no", "off"):
+        return False
+    # Auto: only OIDC-write when no local CLI binary (unit tests / bare homes).
+    return _grok_exe(home) is None
+
+
+def _refresh_via_cli(home: Path, timeout: float) -> Tuple[bool, str]:
+    """Ask Grok CLI to touch the session (it owns auth.json rotation)."""
+    import subprocess
+
+    exe = _grok_exe(home)
+    if not exe:
+        return False, "no grok.exe"
+    before_key, _, before_exp, _, before_rt = _read_auth(home)
+    env = os.environ.copy()
+    env["GROK_HOME"] = str(home)
+    try:
+        subprocess.run(
+            [str(exe), "models"],
+            env=env,
+            capture_output=True,
+            timeout=max(20.0, float(timeout) + 10.0),
+            cwd=str(home),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # CLI may still have written tokens
+        pass
+    except Exception as e:
+        return False, f"cli spawn: {type(e).__name__}"
+    key, _, exp, _, rt = _read_auth(home)
+    now = time.time()
+    if key and key != before_key and _access_still_good(key, exp, now):
+        return True, "cli_refreshed"
+    if rt and before_rt and rt != before_rt:
+        return True, "cli_rt_rotated"
+    if key and _access_still_good(key, exp, now):
+        # CLI ran but did not need to rotate yet
+        if before_exp is not None and exp is not None and exp > before_exp + 30:
+            return True, "cli_refreshed"
+        return True, "cli_access_ok"
+    return False, "cli no upgrade"
+
+
 def _ensure_fresh_token(
     home: Path, client: httpx.Client, timeout: float
 ) -> Tuple[str, str, Optional[float], str, Optional[str]]:
     """Return key, email, exp, team; optional refresh note for meta.
 
-    Refreshes when JWT missing/expired or within REFRESH_SKEW_S of expiry.
-    If refresh_token was already revoked, skip IdP calls and ride the access
-    JWT until it dies — then caller falls back to STALE usage cache (no login).
+    Architecture (why personal kept dying):
+      - rotating refresh_token must have a single writer
+      - panel OIDC + grok CLI racing → invalid_grant / revoked
+      - so panel reads access JWT; if near expiry, asks CLI to refresh
+      - panel OIDC write only when no CLI binary or PANEL_GROK_OIDC_REFRESH=1
     """
     key, email, exp, team, refresh = _read_auth(home)
     now = time.time()
     need = False
     if not key:
-        need = bool(refresh)
+        need = bool(refresh) or True
     elif exp is not None and exp <= now + REFRESH_SKEW_S:
-        need = bool(refresh)
+        need = True
     note: Optional[str] = None
-    if need:
-        if refresh and _is_rt_marked_dead(home, refresh):
-            note = "rt_dead_cached"
-            # Keep non-expired access; otherwise empty key path → STALE.
-            if key and (exp is None or exp > now):
-                return key, email, exp, team, note
-            return key, email, exp, team, note
+    if not need:
+        return key, email, exp, team, note
+
+    if refresh and _is_rt_marked_dead(home, refresh):
+        note = "rt_dead_cached"
+        # Ride non-expired access; else STALE via caller.
+        return key, email, exp, team, note
+
+    # 1) CLI owns auth.json when present
+    if _grok_exe(home) is not None:
+        ok, detail = _refresh_via_cli(home, timeout)
+        key, email, exp, team, refresh2 = _read_auth(home)
+        if ok and key and (exp is None or exp > now):
+            if detail in ("cli_refreshed", "cli_rt_rotated"):
+                _clear_rt_dead(home)
+            return key, email, exp, team, detail
+        note = detail
+        # fall through to optional panel OIDC only if allowed
+        refresh = refresh2 or refresh
+
+    # 2) Panel OIDC only if allowed (tests / no CLI / emergency)
+    if _panel_oidc_allowed(home) and refresh:
         ok, detail = _refresh_oidc(home, client, timeout)
         key, email, exp, team, refresh2 = _read_auth(home)
         if ok:
             _clear_rt_dead(home)
-            # already_fresh / peer_* also count as ok for the probe path.
             note = (
                 "oidc_refreshed"
                 if detail in ("ok", "already_fresh")
@@ -435,11 +513,11 @@ def _ensure_fresh_token(
             note = detail
             if _refresh_looks_revoked(detail) and (refresh or refresh2):
                 _mark_rt_dead(home, refresh2 or refresh, detail)
-            # Keep using non-expired access token if refresh failed (e.g. revoked refresh).
-            if key and (exp is None or exp > now):
-                pass
-            else:
-                return key, email, exp, team, note
+    elif not note:
+        note = "panel_oidc_disabled"
+
+    if key and (exp is None or exp > now):
+        return key, email, exp, team, note
     return key, email, exp, team, note
 
 
@@ -764,26 +842,30 @@ def fetch_grok(
         return r
 
     if resp.status_code in (401, 403):
-        # Access rejected — try one forced refresh even if JWT exp looked fine.
-        ok, detail = _refresh_oidc(home, client, timeout)
-        r.meta["auth_refresh"] = (
-            "oidc_refreshed"
-            if ok and detail in ("ok", "already_fresh")
-            else (detail if ok else detail)
-        )
+        # Access rejected — ask CLI (owner of auth.json); panel OIDC only if allowed.
+        ok = False
+        detail = "no refresh path"
+        if _grok_exe(home) is not None:
+            ok, detail = _refresh_via_cli(home, timeout)
+        if (not ok) and _panel_oidc_allowed(home):
+            ok, detail = _refresh_oidc(home, client, timeout)
+            if ok and detail in ("ok", "already_fresh"):
+                detail = "oidc_refreshed"
+        r.meta["auth_refresh"] = detail
         if ok:
             key, email, exp, team, _ = _read_auth(home)
             r.email = email or r.email
             if team:
                 r.meta["team_id"] = team
-            try:
-                resp = _post(key)
-            except Exception as e:
-                r.status = Status.ERROR
-                r.reason = f"сеть: {type(e).__name__}"
-                _maybe_stale(r.reason)
-                r.latency_ms = (time.perf_counter() - t0) * 1000
-                return r
+            if key:
+                try:
+                    resp = _post(key)
+                except Exception as e:
+                    r.status = Status.ERROR
+                    r.reason = f"сеть: {type(e).__name__}"
+                    _maybe_stale(r.reason)
+                    r.latency_ms = (time.perf_counter() - t0) * 1000
+                    return r
 
     if resp.status_code in (401, 403):
         r.status = Status.AUTH

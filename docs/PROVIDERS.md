@@ -32,9 +32,20 @@ Short-lived access tokens expire independently of the subscription pool. Claude 
 
 Refresh rotates `refresh_token` when the IdP returns a new one; the panel writes it back atomically (`.panel-tmp` → replace). If refresh fails (`invalid_grant` / revoked), status stays AUTH/DEAD until `claude login` / `codex login` / `grok login`.
 
-**Grok race safety:** rotating refresh tokens + concurrent panel/CLI refresh used to burn sessions (`Refresh token has been revoked`). The panel now takes the same advisory `auth.json.lock` (`{pid}:{unix_ts}`) as Grok CLI, re-reads under the lock, and on `invalid_grant` accepts a peer-written fresh JWT.
+**Grok token ownership (important):** rotating `refresh_token` must have **one writer**.  
+Panel used to OIDC-refresh itself and race the CLI → `Refresh token has been revoked` → blank/dead personal card.  
 
-**No-login dashboard:** if the IdP revokes `refresh_token`, the panel marks it in `~/.grok*/.panel-rt-dead.json` (stops hammering oauth), rides the access JWT until it expires, then shows **STALE** SuperGrok % from `~/.grok*/.panel-grok-usage.json`. Cards stay populated without `grok login`. Live auto-refresh resumes automatically when `auth.json` gets a new RT (CLI/login elsewhere).
+**Current rule:** if `~/.grok*/bin/grok.exe` exists, the **CLI owns `auth.json`**. Panel only *reads* the access JWT and, near expiry, runs `grok models` with `GROK_HOME` set to that home. Panel OIDC write is off unless `PANEL_GROK_OIDC_REFRESH=1`.
+
+**Two homes, two logins:**  
+| Home | Typical email | Who updates it |
+|------|---------------|----------------|
+| `~/.grok` | personal | only login with `GROK_HOME=%USERPROFILE%\.grok` |
+| `~/.grok-work` | work | Grok Build / work CLI |
+
+Logging in from Grok Build does **not** fix personal. Use `Heal-Grok-Personal.bat` once for `~/.grok`.
+
+**If RT is already revoked:** ride access JWT → then **STALE** from `.panel-grok-usage.json` until a successful login into the **correct** home.
 
 **Not refreshed (by design):** API keys (OpenRouter, OpenAI key, Gemini key, Kimi key, `GH_TOKEN`) — they do not use this OIDC path. Gemini OAuth has no silent refresh here yet (re-login via Gemini CLI).
 
