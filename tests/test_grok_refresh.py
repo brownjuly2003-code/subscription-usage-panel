@@ -1,13 +1,15 @@
-"""Grok OIDC silent refresh (auth.json rotation)."""
+"""Grok OIDC silent refresh (auth.json rotation + lock + peer race)."""
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
 
+from panel.models import Status
 from panel.providers import grok as grok_mod
 
 
@@ -56,10 +58,8 @@ def test_refresh_when_jwt_expired(tmp_path: Path) -> None:
                 "token_type": "Bearer",
             }
             return r
-        # billing
         r = MagicMock()
         r.status_code = 200
-        # minimal grpc-web frame with empty message → parse fails → ERROR unless we craft body
         r.content = bytes([0, 0, 0, 0, 0])
         return r
 
@@ -76,11 +76,14 @@ def test_refresh_when_jwt_expired(tmp_path: Path) -> None:
     entry = next(iter(saved.values()))
     assert entry["refresh_token"] == "rt-new"
     assert entry["key"] == new_access
+    # lock must not be left behind
+    assert not (home / "auth.json.lock").exists()
 
 
 def test_no_refresh_when_token_fresh(tmp_path: Path) -> None:
     home = tmp_path / ".grok"
-    _write_auth(home, exp=time.time() + 3600)
+    # Outside REFRESH_SKEW_S (1h) — must not hit the IdP.
+    _write_auth(home, exp=time.time() + 7200)
     client = MagicMock(spec=httpx.Client)
     key, _, exp, _, note = grok_mod._ensure_fresh_token(home, client, 5.0)
     assert note is None
@@ -107,3 +110,96 @@ def test_refresh_failure_keeps_valid_access(tmp_path: Path) -> None:
     assert key
     assert exp is not None and exp > time.time()
     assert note and "revoked" in note
+
+
+def test_invalid_grant_accepts_peer_written_token(tmp_path: Path) -> None:
+    """CLI already rotated RT; our POST with old RT fails; re-read sees new JWT."""
+    home = tmp_path / ".grok"
+    old_exp = time.time() - 5
+    _write_auth(home, exp=old_exp, refresh="rt-old")
+    peer_access = _fake_jwt(time.time() + 7200)
+
+    client = MagicMock(spec=httpx.Client)
+
+    def post(url, **kwargs):
+        # Simulate peer (CLI) writing fresh tokens while our request is in flight.
+        _write_auth(home, exp=time.time() + 7200, refresh="rt-peer")
+        # overwrite key with known peer_access
+        data = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+        entry = next(iter(data.values()))
+        entry["key"] = peer_access
+        entry["refresh_token"] = "rt-peer"
+        (home / "auth.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+        r = MagicMock()
+        r.status_code = 400
+        r.json.return_value = {
+            "error": "invalid_grant",
+            "error_description": "Refresh token has been revoked",
+        }
+        r.text = "revoked"
+        return r
+
+    client.post.side_effect = post
+    ok, detail = grok_mod._refresh_oidc(home, client, 5.0)
+    assert ok is True
+    assert detail == "peer_refreshed"
+    key, _, exp, _, rt = grok_mod._read_auth(home)
+    assert key == peer_access
+    assert rt == "rt-peer"
+    assert exp is not None and exp > time.time()
+
+
+def test_already_fresh_under_lock_skips_http(tmp_path: Path) -> None:
+    home = tmp_path / ".grok"
+    # Under lock JWT is already outside skew — no HTTP.
+    _write_auth(home, exp=time.time() + 7200)
+    client = MagicMock(spec=httpx.Client)
+    ok, detail = grok_mod._refresh_oidc(home, client, 5.0)
+    assert ok is True
+    assert detail == "already_fresh"
+    client.post.assert_not_called()
+
+
+def test_stale_usage_cache_on_auth_failure(tmp_path: Path) -> None:
+    home = tmp_path / ".grok"
+    home.mkdir(parents=True, exist_ok=True)
+    # No usable auth
+    end = time.time() + 3 * 86400
+    grok_mod._save_usage_cache(
+        home,
+        used_pct=40.0,
+        rem_pct=60.0,
+        period_label="7d",
+        period_start=end - 7 * 86400,
+        period_end=end,
+        email="t@example.com",
+    )
+    client = MagicMock(spec=httpx.Client)
+    r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
+    assert r.status == Status.STALE
+    assert r.windows
+    assert abs(r.windows[0].rem_pct - 60.0) < 1e-6
+    assert "OIDC" in (r.reason or "") or "login" in (r.reason or "").lower()
+    assert r.meta.get("source", "").startswith("local")
+
+
+def test_auth_lock_format_matches_cli(tmp_path: Path) -> None:
+    home = tmp_path / ".grok"
+    home.mkdir(parents=True, exist_ok=True)
+    seen: list[str] = []
+
+    def grab_while_held():
+        lp = home / "auth.json.lock"
+        if lp.is_file():
+            seen.append(lp.read_text(encoding="utf-8").strip())
+
+    # Hold lock and inspect format
+    with grok_mod._auth_lock(home) as held:
+        assert held
+        grab_while_held()
+    assert seen
+    pid_s, ts_s = seen[0].split(":")
+    assert int(pid_s) == os.getpid()
+    assert abs(float(ts_s) - time.time()) < 5
+    assert not (home / "auth.json.lock").exists()

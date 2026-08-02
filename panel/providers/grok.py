@@ -6,16 +6,22 @@ This is the gRPC-web endpoint that returns credit_usage_percent for the plan poo
 OIDC access tokens (~6h) expire independently of SuperGrok; Grok CLI silent-refreshes
 via refresh_token. The panel must do the same — otherwise a valid session looks like
 "JWT истёк" until the next interactive `grok` run rewrites auth.json.
+
+Refresh tokens rotate. Concurrent refresh (panel + `grok` CLI) without a lock burns the
+session (invalid_grant / revoked). We take the same `auth.json.lock` advisory lock the
+CLI uses, re-read under the lock, and on invalid_grant accept a peer-written fresh JWT.
 """
 from __future__ import annotations
 
 import base64
 import json
+import os
 import struct
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Iterator, Optional, Tuple
 
 import httpx
 
@@ -30,8 +36,13 @@ from panel.timefmt import (
 GRPC_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
 DEFAULT_OIDC_ISSUER = "https://auth.x.ai"
 DEFAULT_OIDC_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
-# Refresh a bit before JWT exp so the next poll never hard-fails on clock skew.
-REFRESH_SKEW_S = 120.0
+# Refresh in the last hour of JWT life (~6h). Short skew left revoked RTs
+# undiscovered until the card went blank; locking makes early rotate safe vs CLI.
+REFRESH_SKEW_S = 3600.0
+# Grok CLI writes `auth.json.lock` as `{pid}:{unix_ts}`. Stale locks are broken.
+LOCK_STALE_S = 45.0
+LOCK_WAIT_S = 12.0
+USAGE_CACHE_NAME = ".panel-grok-usage.json"
 
 
 def _jwt_exp(token: str) -> Optional[float]:
@@ -50,6 +61,108 @@ def _jwt_exp(token: str) -> Optional[float]:
 
 def _auth_path(home: Path) -> Path:
     return home / "auth.json"
+
+
+def _lock_path(home: Path) -> Path:
+    return home / "auth.json.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            # 5 = access denied → process exists but we can't open it
+            if ctypes.GetLastError() == 5:
+                return True
+            return False
+        except Exception:
+            return True  # be conservative: don't steal lock if unsure
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return True
+
+
+def _break_stale_lock(lock: Path) -> bool:
+    """Remove lock if holder is dead or lock is older than LOCK_STALE_S."""
+    try:
+        raw = lock.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return False
+    pid, ts = 0, 0.0
+    if ":" in raw:
+        a, b = raw.split(":", 1)
+        try:
+            pid = int(a)
+            ts = float(b)
+        except ValueError:
+            pid, ts = 0, 0.0
+    age = time.time() - ts if ts > 0 else 9999.0
+    if age > LOCK_STALE_S or (pid and not _pid_alive(pid)):
+        try:
+            lock.unlink(missing_ok=True)  # type: ignore[call-arg]
+            return True
+        except TypeError:
+            try:
+                if lock.exists():
+                    lock.unlink()
+                return True
+            except OSError:
+                return False
+        except OSError:
+            return False
+    return False
+
+
+@contextmanager
+def _auth_lock(home: Path, wait_s: float = LOCK_WAIT_S) -> Iterator[bool]:
+    """Advisory exclusive lock compatible with Grok CLI (`pid:unix_ts`).
+
+    Yields True if this process holds the lock, False if wait timed out.
+    """
+    lock = _lock_path(home)
+    home.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + max(0.5, wait_s)
+    my_pid = os.getpid()
+    held = False
+    while time.time() < deadline:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, f"{my_pid}:{int(time.time())}".encode("ascii"))
+            finally:
+                os.close(fd)
+            held = True
+            break
+        except FileExistsError:
+            _break_stale_lock(lock)
+            time.sleep(0.05)
+        except OSError:
+            time.sleep(0.05)
+    try:
+        yield held
+    finally:
+        if held:
+            try:
+                cur = lock.read_text(encoding="utf-8", errors="replace").strip()
+                if cur.startswith(f"{my_pid}:"):
+                    lock.unlink()
+            except OSError:
+                pass
 
 
 def _load_auth(home: Path) -> Tuple[dict[str, Any], str, dict[str, Any]]:
@@ -96,75 +209,124 @@ def _write_auth(home: Path, data: dict[str, Any]) -> None:
     tmp.replace(p)
 
 
+def _access_still_good(
+    key: str, exp: Optional[float], now: float, *, skew: float = 0.0
+) -> bool:
+    if not key:
+        return False
+    if exp is None:
+        return True
+    return exp > now + skew
+
+
 def _refresh_oidc(
     home: Path, client: httpx.Client, timeout: float
 ) -> Tuple[bool, str]:
     """Silent OIDC refresh using stored refresh_token. Updates auth.json in place.
 
     Returns (ok, detail). On success auth.json has a fresh access token (+ rotated refresh).
+    Takes auth.json.lock so we do not race the Grok CLI (rotating RT + lost update).
     """
-    data, entry_key, entry = _load_auth(home)
-    if not entry or not entry_key:
-        return False, "no auth entry"
-    refresh = str(entry.get("refresh_token") or "").strip()
-    if not refresh:
-        return False, "no refresh_token"
-    client_id = str(
-        entry.get("oidc_client_id") or DEFAULT_OIDC_CLIENT_ID
-    ).strip()
-    issuer = str(entry.get("oidc_issuer") or DEFAULT_OIDC_ISSUER).strip()
-    url = _token_endpoint(issuer)
-    try:
-        resp = client.post(
-            url,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh,
-                "client_id": client_id,
-            },
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
-            timeout=timeout,
+    with _auth_lock(home) as held:
+        if not held:
+            # Peer (CLI) may be refreshing — re-read; if JWT is already good, treat as ok.
+            key, _, exp, _, _ = _read_auth(home)
+            if _access_still_good(key, exp, time.time(), skew=REFRESH_SKEW_S):
+                return True, "peer_lock_fresh"
+            if _access_still_good(key, exp, time.time()):
+                return True, "peer_lock_access_ok"
+            return False, "auth lock busy"
+
+        # Under lock: re-read — CLI may have already rotated while we waited.
+        data, entry_key, entry = _load_auth(home)
+        if not entry or not entry_key:
+            return False, "no auth entry"
+        key = (entry.get("key") or "").strip()
+        exp = _jwt_exp(key)
+        now = time.time()
+        if _access_still_good(key, exp, now, skew=REFRESH_SKEW_S):
+            return True, "already_fresh"
+
+        refresh = str(entry.get("refresh_token") or "").strip()
+        if not refresh:
+            return False, "no refresh_token"
+        client_id = str(
+            entry.get("oidc_client_id") or DEFAULT_OIDC_CLIENT_ID
+        ).strip()
+        issuer = str(entry.get("oidc_issuer") or DEFAULT_OIDC_ISSUER).strip()
+        url = _token_endpoint(issuer)
+        try:
+            resp = client.post(
+                url,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "client_id": client_id,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+                timeout=timeout,
+            )
+        except Exception as e:
+            return False, f"refresh network: {type(e).__name__}"
+
+        if resp.status_code != 200:
+            detail = ""
+            try:
+                err = resp.json()
+                detail = str(err.get("error_description") or err.get("error") or "")
+            except Exception:
+                detail = (resp.text or "")[:120]
+            # Classic race: peer already consumed RT1 and wrote RT2+new JWT.
+            data2, _, entry2 = _load_auth(home)
+            if entry2:
+                key2 = (entry2.get("key") or "").strip()
+                exp2 = _jwt_exp(key2)
+                if key2 and key2 != key and _access_still_good(key2, exp2, time.time()):
+                    return True, "peer_refreshed"
+                # If peer wrote a different refresh but same dead access — still fail.
+                _ = data2  # silence lint; re-read is intentional
+            msg = f"refresh HTTP {resp.status_code}" + (
+                f": {detail}" if detail else ""
+            )
+            return False, msg
+
+        try:
+            body = resp.json()
+        except Exception:
+            return False, "refresh: bad JSON"
+        access = str(body.get("access_token") or "").strip()
+        if not access:
+            return False, "refresh: no access_token"
+        new_refresh = str(body.get("refresh_token") or "").strip() or refresh
+        expires_in = body.get("expires_in")
+        now_dt = datetime.now(timezone.utc)
+        # Re-load once more so we do not clobber unrelated fields CLI just wrote.
+        data, entry_key, entry = _load_auth(home)
+        if not entry or not entry_key:
+            return False, "no auth entry after refresh"
+        if expires_in is not None:
+            try:
+                exp_dt = now_dt + timedelta(seconds=int(expires_in))
+                entry["expires_at"] = (
+                    exp_dt.strftime("%Y-%m-%dT%H:%M:%S.")
+                    + f"{exp_dt.microsecond:06d}Z"
+                )
+            except Exception:
+                entry["expires_at"] = now_dt.isoformat().replace("+00:00", "Z")
+        entry["key"] = access
+        entry["refresh_token"] = new_refresh
+        entry["create_time"] = (
+            now_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_dt.microsecond:06d}Z"
         )
-    except Exception as e:
-        return False, f"refresh network: {type(e).__name__}"
-
-    if resp.status_code != 200:
-        detail = ""
+        data[entry_key] = entry
         try:
-            err = resp.json()
-            detail = str(err.get("error_description") or err.get("error") or "")
-        except Exception:
-            detail = (resp.text or "")[:120]
-        return False, f"refresh HTTP {resp.status_code}" + (f": {detail}" if detail else "")
-
-    try:
-        body = resp.json()
-    except Exception:
-        return False, "refresh: bad JSON"
-    access = str(body.get("access_token") or "").strip()
-    if not access:
-        return False, "refresh: no access_token"
-    new_refresh = str(body.get("refresh_token") or "").strip() or refresh
-    expires_in = body.get("expires_in")
-    now = datetime.now(timezone.utc)
-    if expires_in is not None:
-        try:
-            exp_dt = now + timedelta(seconds=int(expires_in))
-            entry["expires_at"] = exp_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{exp_dt.microsecond:06d}Z"
-        except Exception:
-            entry["expires_at"] = now.isoformat().replace("+00:00", "Z")
-    entry["key"] = access
-    entry["refresh_token"] = new_refresh
-    entry["create_time"] = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond:06d}Z"
-    data[entry_key] = entry
-    try:
-        _write_auth(home, data)
-    except Exception as e:
-        return False, f"refresh write failed: {type(e).__name__}"
-    return True, "ok"
+            _write_auth(home, data)
+        except Exception as e:
+            return False, f"refresh write failed: {type(e).__name__}"
+        return True, "ok"
 
 
 def _ensure_fresh_token(
@@ -184,9 +346,14 @@ def _ensure_fresh_token(
     note: Optional[str] = None
     if need:
         ok, detail = _refresh_oidc(home, client, timeout)
+        key, email, exp, team, _ = _read_auth(home)
         if ok:
-            key, email, exp, team, _ = _read_auth(home)
-            note = "oidc_refreshed"
+            # already_fresh / peer_* also count as ok for the probe path.
+            note = (
+                "oidc_refreshed"
+                if detail in ("ok", "already_fresh")
+                else detail
+            )
         else:
             note = detail
             # Keep using non-expired access token if refresh failed (e.g. revoked refresh).
@@ -195,6 +362,81 @@ def _ensure_fresh_token(
             else:
                 return key, email, exp, team, note
     return key, email, exp, team, note
+
+
+def _usage_cache_path(home: Path) -> Path:
+    return home / USAGE_CACHE_NAME
+
+
+def _save_usage_cache(
+    home: Path,
+    *,
+    used_pct: float,
+    rem_pct: float,
+    period_label: str,
+    period_start: Optional[float],
+    period_end: Optional[float],
+    email: str,
+) -> None:
+    """Persist last good SuperGrok pool so AUTH blips do not blank the card."""
+    payload = {
+        "used_pct": used_pct,
+        "rem_pct": rem_pct,
+        "period_label": period_label,
+        "period_start": period_start,
+        "period_end": period_end,
+        "email": email,
+        "saved_at": time.time(),
+    }
+    try:
+        p = _usage_cache_path(home)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def _load_usage_cache(home: Path) -> Optional[dict[str, Any]]:
+    p = _usage_cache_path(home)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    end = data.get("period_end")
+    if end is not None:
+        try:
+            if float(end) <= time.time():
+                return None  # pool window already rolled — do not show fake %
+        except (TypeError, ValueError):
+            pass
+    if data.get("rem_pct") is None and data.get("used_pct") is None:
+        return None
+    return data
+
+
+def _windows_from_cache(cache: dict[str, Any]) -> list[Window]:
+    used = float(cache.get("used_pct") if cache.get("used_pct") is not None else 100.0 - float(cache["rem_pct"]))
+    rem = float(cache.get("rem_pct") if cache.get("rem_pct") is not None else 100.0 - used)
+    end = cache.get("period_end")
+    try:
+        end_f = float(end) if end is not None else None
+    except (TypeError, ValueError):
+        end_f = None
+    lbl = str(cache.get("period_label") or _period_label(cache.get("period_start"), end_f))
+    return [
+        Window(
+            label=lbl,
+            used_pct=used,
+            rem_pct=rem,
+            reset=format_reset_epoch(end_f) if end_f else "",
+            reset_at=format_reset_at_epoch(end_f) if end_f else "",
+        )
+    ]
 
 
 def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
@@ -349,6 +591,23 @@ def fetch_grok(
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
+    def _maybe_stale(reason: str) -> None:
+        """Keep last known SuperGrok pool on the card instead of blank AUTH/DEAD."""
+        cache = _load_usage_cache(home)
+        if not cache:
+            return
+        try:
+            r.windows = _windows_from_cache(cache)
+        except Exception:
+            return
+        r.status = Status.STALE
+        r.reason = reason
+        r.plan = r.plan or "SuperGrok"
+        if not r.email and cache.get("email"):
+            r.email = str(cache["email"])
+        r.meta["source"] = "local .panel-grok-usage.json (not live)"
+        r.meta["cache_reason"] = reason
+
     key, email, exp, team, refresh_note = _ensure_fresh_token(home, client, timeout)
     r.email = email
     if team:
@@ -359,6 +618,16 @@ def fetch_grok(
     if not key:
         r.status = Status.DEAD
         r.reason = "нет OIDC (grok login)"
+        if refresh_note and refresh_note not in (
+            "ok",
+            "oidc_refreshed",
+            "already_fresh",
+            "peer_refreshed",
+            "peer_lock_fresh",
+            "peer_lock_access_ok",
+        ):
+            r.reason = f"нет OIDC ({refresh_note})"
+        _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
@@ -367,8 +636,20 @@ def fetch_grok(
         # Refresh was attempted (if refresh_token existed) and still expired.
         r.status = Status.AUTH
         r.reason = "JWT истёк — grok login"
-        if refresh_note and refresh_note not in ("ok", "oidc_refreshed"):
-            r.reason = f"JWT истёк ({refresh_note})"
+        if refresh_note and refresh_note not in (
+            "ok",
+            "oidc_refreshed",
+            "already_fresh",
+            "peer_refreshed",
+            "peer_lock_fresh",
+            "peer_lock_access_ok",
+        ):
+            # Surface revoked RT clearly — user must re-login once.
+            if "revoked" in refresh_note.lower() or "invalid_grant" in refresh_note.lower():
+                r.reason = "refresh_token revoked — grok login"
+            else:
+                r.reason = f"JWT истёк ({refresh_note})"
+        _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
@@ -392,13 +673,18 @@ def fetch_grok(
     except Exception as e:
         r.status = Status.ERROR
         r.reason = f"сеть: {type(e).__name__}"
+        _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
     if resp.status_code in (401, 403):
         # Access rejected — try one forced refresh even if JWT exp looked fine.
         ok, detail = _refresh_oidc(home, client, timeout)
-        r.meta["auth_refresh"] = "oidc_refreshed" if ok else detail
+        r.meta["auth_refresh"] = (
+            "oidc_refreshed"
+            if ok and detail in ("ok", "already_fresh")
+            else (detail if ok else detail)
+        )
         if ok:
             key, email, exp, team, _ = _read_auth(home)
             r.email = email or r.email
@@ -409,18 +695,21 @@ def fetch_grok(
             except Exception as e:
                 r.status = Status.ERROR
                 r.reason = f"сеть: {type(e).__name__}"
+                _maybe_stale(r.reason)
                 r.latency_ms = (time.perf_counter() - t0) * 1000
                 return r
 
     if resp.status_code in (401, 403):
         r.status = Status.AUTH
-        r.reason = "auth rejected — grok login / cookies"
+        r.reason = "auth rejected — grok login"
+        _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
     if resp.status_code != 200:
         r.status = Status.ERROR
         r.reason = f"HTTP {resp.status_code}"
+        _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
@@ -429,6 +718,7 @@ def fetch_grok(
     if used is None:
         r.status = Status.ERROR
         r.reason = "нет credit_usage_percent в gRPC"
+        _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
@@ -439,12 +729,13 @@ def fetch_grok(
     lbl = _period_label(start, end)
     reset = format_reset_epoch(end) if end else ""
     reset_at = format_reset_at_epoch(end) if end else ""
+    rem_f = 100.0 - used_f
 
     r.windows = [
         Window(
             label=lbl,
             used_pct=used_f,
-            rem_pct=100.0 - used_f,
+            rem_pct=rem_f,
             reset=reset,
             reset_at=reset_at,
         )
@@ -461,6 +752,16 @@ def fetch_grok(
         r.meta["period_end"] = datetime.fromtimestamp(end, tz=timezone.utc).isoformat()
     if exp is not None:
         r.meta["token_left"] = fmt_diff_seconds(exp - now)
+
+    _save_usage_cache(
+        home,
+        used_pct=used_f,
+        rem_pct=rem_f,
+        period_label=lbl,
+        period_start=float(start) if start is not None else None,
+        period_end=float(end) if end is not None else None,
+        email=r.email or "",
+    )
 
     r.latency_ms = (time.perf_counter() - t0) * 1000
     return r
