@@ -69,6 +69,18 @@ def _window_human(label: str) -> str:
     return m.get((label or "").lower(), label or "period")
 
 
+def _human_interval(seconds: int) -> str:
+    """Compact interval for badge/footer (60 → 60s, 300 → 5m)."""
+    s = max(1, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s % 3600 == 0:
+        return f"{s // 3600}h"
+    if s % 60 == 0:
+        return f"{s // 60}m"
+    return f"{s}s"
+
+
 def _sparkline_svg(
     rem: float,
     color: str,
@@ -177,21 +189,64 @@ def render_dashboard_html(
     title: str = "Subscription remaining",
     theme: str = "dark",
     live: bool = False,
-    poll_seconds: int = 60,
+    poll_seconds: int | None = None,
+    data_refresh_seconds: int = 300,
     payload: dict | None = None,
     live_port: int = 8765,
 ) -> str:
+    """Render dashboard HTML.
+
+    *live=True* (``--serve``): badge is real re-fetch cadence (``poll_seconds``).
+    *live=False* (``dashboard.html`` file): badge is scheduled **data** rewrite
+    cadence (``data_refresh_seconds``, default 5m = open-dashboard.ps1 task).
+    Browser page reload uses the same interval so the badge is not a lie
+    (old default advertised "Auto · 60s" while the Task Scheduler job was 5–10m).
+    """
     from panel.history import attach_history, append_snapshot
     from panel.schema import build_payload
 
     theme = "light" if str(theme).lower() == "light" else "dark"
+    data_refresh_seconds = max(15, int(data_refresh_seconds))
+    if poll_seconds is None:
+        # File snapshot: reload only as often as data is expected to change.
+        # Live server: default 60s re-fetch unless caller passes cfg.interval.
+        poll_seconds = data_refresh_seconds if not live else 60
+    poll_seconds = max(15, int(poll_seconds))
+    poll_label = _human_interval(poll_seconds)
+    data_label = _human_interval(data_refresh_seconds)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if live:
+        refresh_badge = (
+            f'<span class="gf-btn" title="Live server re-fetches providers every {poll_label}">'
+            f'<span class="live-dot"></span>Live · {poll_label}</span>'
+        )
+        refresh_banner = ""
+        refresh_footer = f"Live server: re-fetch + reload every {poll_label}."
+    else:
+        refresh_badge = (
+            f'<span class="gf-btn" title="Scheduled task rewrites dashboard.html every {data_label}; '
+            f'page reloads on the same cadence to pick it up">'
+            f'<span class="live-dot"></span>Data · {data_label}</span>'
+        )
+        refresh_banner = f'''
+      <div id="snapBanner" style="margin:0 16px 8px;padding:8px 12px;border-radius:4px;border:1px solid var(--gf-border-weak);background:var(--gf-primary-bg);color:var(--gf-text-secondary);font-size:12px;">
+        Snapshot as of <b style="color:var(--gf-text-primary)">{_esc(now)}</b>
+        · data rewrite ~{data_label} (Task Scheduler / Open Dashboard)
+        · page reloads every {poll_label} to re-read this file
+        · instant pull: <code>Open Dashboard.bat</code>
+      </div>
+      '''
+        refresh_footer = (
+            f"Data rewrite ~{data_label} (scheduled task). "
+            f"Page reloads every {poll_label} to re-read dashboard.html from disk."
+        )
+
     live_cards, offline = _cards(results)
     if payload is None:
         payload = build_payload(results, wall_ms, meta={"mode": "html"})
         append_snapshot(payload.get("profiles") or [])
         attach_history(payload)
     alerts = payload.get("alerts") or []
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     live_n = sum(1 for r in results if r.status == Status.LIVE)
     total = len(results)
     families_present = sorted({c["family"] for c in live_cards} | {o["family"] for o in offline})
@@ -211,12 +266,11 @@ def render_dashboard_html(
             )
         alert_html = f'<div class="alert-strip">{"".join(items)}</div>'
 
-    # --- Stat panels: one fact each field, no duplicate rem/reset ---
+    # --- Stat panels: big rem % + reset only (period legend is global above grid) ---
     stat_panels = []
     for c in live_cards:
         p = c["primary"]
         rem = p["rem_pct"]
-        used = p["used_pct"]
         col = _threshold_rem(rem)
         # map history: cards don't have id — recover from label match in payload
         hist = []
@@ -227,6 +281,12 @@ def render_dashboard_html(
         spark = _sparkline_svg(rem, col, history=hist)
         plan = _esc(c["plan"]) if c["plan"] else ""
         period = _window_human(p.get("label") or "")
+        # Week is stated once in the toolbar; non-week primaries still need a hint.
+        period_line = (
+            ""
+            if period == "week"
+            else f'<div class="stat-title">{_esc(period)}</div>'
+        )
 
         # reset once: absolute date preferred, relative only if no date
         if p.get("reset_at"):
@@ -279,8 +339,7 @@ def render_dashboard_html(
         <div class="panel-content stat-content">
           <div class="stat-value-wrap">
             <div class="stat-value" style="color:{col}">{_esc(fmt_pct(rem, 2))}</div>
-            <div class="stat-title">remaining · {_esc(period)}</div>
-            <div class="stat-used">used {_esc(fmt_pct(used, 2))}</div>
+            {period_line}
             <div class="stat-reset">{reset_line}</div>
           </div>
           <div class="stat-graph">
@@ -788,14 +847,8 @@ def render_dashboard_html(
     color: var(--gf-text-secondary);
     font-weight: 400;
   }}
-  .stat-used {{
-    margin-top: 4px;
-    font-size: 12px;
-    color: var(--gf-text-disabled);
-    font-variant-numeric: tabular-nums;
-  }}
   .stat-reset {{
-    margin-top: 4px;
+    margin-top: 6px;
     font-size: 12px;
     color: var(--gf-text-disabled);
     font-variant-numeric: tabular-nums;
@@ -925,7 +978,7 @@ def render_dashboard_html(
       <div class="dash-toolbar">
         <div class="dash-title-wrap">
           <h1 class="dash-title">{_esc(title)}</h1>
-          <div class="dash-subtitle">Claude · Codex · Grok — subscription remaining only</div>
+          <div class="dash-subtitle">Weekly limit remaining</div>
         </div>
         <div class="dash-controls">
           <input type="search" id="profileSearch" class="search-box" placeholder="Filter profiles…" />
@@ -937,18 +990,11 @@ def render_dashboard_html(
             <span class="ico">⏱</span>
             {_esc(now)}
           </div>
-          {f'<span class="gf-btn"><span class="live-dot"></span>{"Live" if live else "Auto"} · {int(poll_seconds)}s</span>'}
+          {refresh_badge}
         </div>
       </div>
 
-      {"" if live else f'''
-      <div id="snapBanner" style="margin:0 16px 8px;padding:8px 12px;border-radius:4px;border:1px solid var(--gf-border-weak);background:var(--gf-primary-bg);color:var(--gf-text-secondary);font-size:12px;">
-        Data as of <b style="color:var(--gf-text-primary)">{_esc(now)}</b>
-        · page reloads every {int(poll_seconds)}s
-        · background job rewrites this file (Install schedule)
-        · instant pull: <code>Open Dashboard.bat</code>
-      </div>
-      '''}
+      {refresh_banner}
 
       <div class="dashboard">
         <div class="filter-bar">
@@ -964,7 +1010,7 @@ def render_dashboard_html(
       </div>
 
       <div class="page-footer">
-        {"Live server: re-fetch + reload." if live else f"Auto-reload every {int(poll_seconds)}s (re-reads dashboard.html from disk)."}
+        {refresh_footer}
       </div>
     </div>
   </div>
@@ -1083,7 +1129,13 @@ def write_dashboard(
     theme: str = "dark",
     live_hint_port: int = 8765,
     payload: dict | None = None,
+    data_refresh_seconds: int = 300,
 ) -> None:
+    """Write static dashboard.html (file mode).
+
+    data_refresh_seconds should match the Task Scheduler interval
+    (open-dashboard.ps1 -EveryMinutes, default 5 → 300s).
+    """
     path.write_text(
         render_dashboard_html(
             results,
@@ -1092,6 +1144,7 @@ def write_dashboard(
             live=False,
             live_port=live_hint_port,
             payload=payload,
+            data_refresh_seconds=data_refresh_seconds,
         ),
         encoding="utf-8",
     )
