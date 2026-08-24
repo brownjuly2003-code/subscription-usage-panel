@@ -82,6 +82,10 @@ Or add a family block to `catalog.yaml` + implement `fetch_*`.
 
 See [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
+## In-terminal companion (Codex CLI)
+
+Quota belongs on the dashboard; per-session state belongs in the terminal. [docs/CODEX_STATUS_LINE.md](docs/CODEX_STATUS_LINE.md) covers the built-in `[tui].status_line` config (all item ids, plus the failure modes that make an edit look ignored), and `tools/codex_status.py` prints one line about every Codex session running right now — read straight from the local state file, no API calls.
+
 ## Multi-profile discovery
 
 For each catalog family, scans:
