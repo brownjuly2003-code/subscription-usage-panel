@@ -1,4 +1,5 @@
 """Grok OIDC silent refresh (auth.json rotation + lock + peer race)."""
+
 from __future__ import annotations
 
 import json
@@ -27,7 +28,7 @@ def _fake_jwt(exp: float) -> str:
         raw = json.dumps(obj, separators=(",", ":")).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    return f"{b64({'alg':'none'})}.{b64({'exp': exp})}.sig"
+    return f"{b64({'alg': 'none'})}.{b64({'exp': exp})}.sig"
 
 
 def _write_auth(home: Path, *, exp: float, refresh: str = "rt-old") -> None:
@@ -42,9 +43,7 @@ def _write_auth(home: Path, *, exp: float, refresh: str = "rt-old") -> None:
         "expires_at": "2099-01-01T00:00:00.000000Z",
     }
     data = {f"https://auth.x.ai::{grok_mod.DEFAULT_OIDC_CLIENT_ID}": entry}
-    (home / "auth.json").write_text(
-        json.dumps(data, indent=2) + "\n", encoding="utf-8"
-    )
+    (home / "auth.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def test_refresh_when_jwt_expired(tmp_path: Path) -> None:
@@ -136,7 +135,9 @@ def test_invalid_grant_accepts_peer_written_token(tmp_path: Path) -> None:
         entry = next(iter(data.values()))
         entry["key"] = peer_access
         entry["refresh_token"] = "rt-peer"
-        (home / "auth.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        (home / "auth.json").write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
 
         r = MagicMock()
         r.status_code = 400
@@ -238,6 +239,109 @@ def test_stale_after_dead_jwt_no_login_nag(tmp_path: Path) -> None:
     assert r.windows and abs(r.windows[0].rem_pct - 75.0) < 1e-6
     assert "login" not in (r.reason or "").lower()
     client.post.assert_not_called()
+
+
+def _omitted_pct_client(
+    monkeypatch: pytest.MonkeyPatch, start: float, end: float
+) -> MagicMock:
+    """gRPC 200 that carries period bounds but no credit_usage_percent."""
+    monkeypatch.setattr(
+        grok_mod,
+        "parse_credits_config",
+        lambda _body: {"period_start": start, "period_end": end},
+    )
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.content = b"\x00\x00\x00\x00\x01\x00"
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = resp
+    return client
+
+
+def test_omitted_used_pct_after_real_roll_is_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Genuine roll: bounds moved forward, so an omitted percent really is 0% (proto3)."""
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() + 7200)
+    prev_end = time.time() - 60
+    grok_mod._save_usage_cache(
+        home,
+        used_pct=100.0,
+        rem_pct=0.0,
+        period_label="7d",
+        period_start=prev_end - 7 * 86400,
+        period_end=prev_end,
+        email="t@example.com",
+    )
+    start = time.time() - 30
+    client = _omitted_pct_client(monkeypatch, start, start + 7 * 86400)
+
+    r = grok_mod.fetch_grok("grok-work", "GROK/work", home, client, 5.0)
+    assert r.status == Status.LIVE
+    assert r.windows
+    assert abs(r.windows[0].used_pct - 0.0) < 1e-6
+    assert abs(r.windows[0].rem_pct - 100.0) < 1e-6
+    assert r.plan == "SuperGrok"
+
+
+def test_omitted_used_pct_same_window_never_reads_as_full_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spent pool: xAI drops the percent but keeps the window. Card must stay at 0% left."""
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() + 7200)
+    start = time.time() - 6 * 86400
+    end = start + 7 * 86400
+    grok_mod._save_usage_cache(
+        home,
+        used_pct=100.0,
+        rem_pct=0.0,
+        period_label="7d",
+        period_start=start,
+        period_end=end,
+        email="t@example.com",
+    )
+    client = _omitted_pct_client(monkeypatch, start, end)
+
+    r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
+    assert r.status == Status.STALE
+    assert r.windows
+    assert abs(r.windows[0].rem_pct - 0.0) < 1e-6
+    assert abs(r.windows[0].used_pct - 100.0) < 1e-6
+    assert r.meta.get("percent_missing")
+
+
+def test_omitted_used_pct_without_history_is_unknown_not_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No previous window on record = no proof of a roll = no invented percent."""
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() + 7200)
+    start = time.time() - 3 * 86400
+    client = _omitted_pct_client(monkeypatch, start, start + 7 * 86400)
+
+    r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
+    assert r.status == Status.ERROR
+    assert not r.windows
+
+
+def test_empty_grpc_still_errors_without_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() + 7200)
+    monkeypatch.setattr(grok_mod, "parse_credits_config", lambda _body: {})
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.content = b"\x00"
+    client = MagicMock(spec=httpx.Client)
+    client.post.return_value = resp
+
+    r = grok_mod.fetch_grok("grok-work", "GROK/work", home, client, 5.0)
+    assert r.status == Status.ERROR
+    assert "credit_usage" in (r.reason or "")
+    assert not r.windows
 
 
 def test_auth_lock_format_matches_cli(tmp_path: Path) -> None:

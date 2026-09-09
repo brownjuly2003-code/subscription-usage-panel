@@ -11,6 +11,7 @@ Refresh tokens rotate. Concurrent refresh (panel + `grok` CLI) without a lock bu
 session (invalid_grant / revoked). We take the same `auth.json.lock` advisory lock the
 CLI uses, re-read under the lock, and on invalid_grant accept a peer-written fresh JWT.
 """
+
 from __future__ import annotations
 
 import base64
@@ -43,6 +44,9 @@ REFRESH_SKEW_S = 180.0
 LOCK_STALE_S = 45.0
 LOCK_WAIT_S = 12.0
 USAGE_CACHE_NAME = ".panel-grok-usage.json"
+# Window bounds must move forward by more than this to count as a real roll.
+# Guards against jitter in the sub-second part of the subscription anniversary.
+PERIOD_ROLL_EPS_S = 60.0
 # When IdP revokes refresh_token, stop hammering oauth2/token. Panel keeps LIVE
 # while access JWT works, then STALE from usage cache.
 RT_DEAD_NAME = ".panel-rt-dead.json"
@@ -225,9 +229,7 @@ def _access_still_good(
     return exp > now + skew
 
 
-def _refresh_oidc(
-    home: Path, client: httpx.Client, timeout: float
-) -> Tuple[bool, str]:
+def _refresh_oidc(home: Path, client: httpx.Client, timeout: float) -> Tuple[bool, str]:
     """Silent OIDC refresh using stored refresh_token. Updates auth.json in place.
 
     Returns (ok, detail). On success auth.json has a fresh access token (+ rotated refresh).
@@ -256,9 +258,7 @@ def _refresh_oidc(
         refresh = str(entry.get("refresh_token") or "").strip()
         if not refresh:
             return False, "no refresh_token"
-        client_id = str(
-            entry.get("oidc_client_id") or DEFAULT_OIDC_CLIENT_ID
-        ).strip()
+        client_id = str(entry.get("oidc_client_id") or DEFAULT_OIDC_CLIENT_ID).strip()
         issuer = str(entry.get("oidc_issuer") or DEFAULT_OIDC_ISSUER).strip()
         url = _token_endpoint(issuer)
         try:
@@ -294,9 +294,7 @@ def _refresh_oidc(
                     return True, "peer_refreshed"
                 # If peer wrote a different refresh but same dead access — still fail.
                 _ = data2  # silence lint; re-read is intentional
-            msg = f"refresh HTTP {resp.status_code}" + (
-                f": {detail}" if detail else ""
-            )
+            msg = f"refresh HTTP {resp.status_code}" + (f": {detail}" if detail else "")
             return False, msg
 
         try:
@@ -317,8 +315,7 @@ def _refresh_oidc(
             try:
                 exp_dt = now_dt + timedelta(seconds=int(expires_in))
                 entry["expires_at"] = (
-                    exp_dt.strftime("%Y-%m-%dT%H:%M:%S.")
-                    + f"{exp_dt.microsecond:06d}Z"
+                    exp_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{exp_dt.microsecond:06d}Z"
                 )
             except Exception:
                 entry["expires_at"] = now_dt.isoformat().replace("+00:00", "Z")
@@ -374,7 +371,9 @@ def _mark_rt_dead(home: Path, refresh: str, detail: str) -> None:
     try:
         p = _rt_dead_path(home)
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         tmp.replace(p)
     except OSError:
         pass
@@ -504,11 +503,7 @@ def _ensure_fresh_token(
         key, email, exp, team, refresh2 = _read_auth(home)
         if ok:
             _clear_rt_dead(home)
-            note = (
-                "oidc_refreshed"
-                if detail in ("ok", "already_fresh")
-                else detail
-            )
+            note = "oidc_refreshed" if detail in ("ok", "already_fresh") else detail
         else:
             note = detail
             if _refresh_looks_revoked(detail) and (refresh or refresh2):
@@ -548,13 +543,20 @@ def _save_usage_cache(
     try:
         p = _usage_cache_path(home)
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         tmp.replace(p)
     except OSError:
         pass
 
 
-def _load_usage_cache(home: Path) -> Optional[dict[str, Any]]:
+def _read_usage_cache(home: Path) -> Optional[dict[str, Any]]:
+    """Raw parse of the usage cache. No freshness filtering.
+
+    Needed for period comparison: `_load_usage_cache` drops an already-rolled
+    window, which is exactly the record we must see to prove a roll happened.
+    """
     p = _usage_cache_path(home)
     if not p.is_file():
         return None
@@ -562,7 +564,12 @@ def _load_usage_cache(home: Path) -> Optional[dict[str, Any]]:
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _load_usage_cache(home: Path) -> Optional[dict[str, Any]]:
+    data = _read_usage_cache(home)
+    if data is None:
         return None
     end = data.get("period_end")
     if end is not None:
@@ -576,15 +583,49 @@ def _load_usage_cache(home: Path) -> Optional[dict[str, Any]]:
     return data
 
 
+def _period_is_new(
+    cache: Optional[dict[str, Any]],
+    start: Optional[float],
+    end: Optional[float],
+) -> bool:
+    """True only when the gRPC window is provably newer than the last recorded one.
+
+    No previous record means no proof, and no proof means we do not invent a
+    percent. Being briefly unknown is cheap; claiming a full pool is not.
+    """
+    if not cache:
+        return False
+    for now_v, prev_v in (
+        (start, cache.get("period_start")),
+        (end, cache.get("period_end")),
+    ):
+        if now_v is None or prev_v is None:
+            continue
+        try:
+            if float(now_v) > float(prev_v) + PERIOD_ROLL_EPS_S:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _windows_from_cache(cache: dict[str, Any]) -> list[Window]:
-    used = float(cache.get("used_pct") if cache.get("used_pct") is not None else 100.0 - float(cache["rem_pct"]))
-    rem = float(cache.get("rem_pct") if cache.get("rem_pct") is not None else 100.0 - used)
+    used = float(
+        cache.get("used_pct")
+        if cache.get("used_pct") is not None
+        else 100.0 - float(cache["rem_pct"])
+    )
+    rem = float(
+        cache.get("rem_pct") if cache.get("rem_pct") is not None else 100.0 - used
+    )
     end = cache.get("period_end")
     try:
         end_f = float(end) if end is not None else None
     except (TypeError, ValueError):
         end_f = None
-    lbl = str(cache.get("period_label") or _period_label(cache.get("period_start"), end_f))
+    lbl = str(
+        cache.get("period_label") or _period_label(cache.get("period_start"), end_f)
+    )
     return [
         Window(
             label=lbl,
@@ -883,17 +924,34 @@ def fetch_grok(
 
     parsed = parse_credits_config(resp.content)
     used = parsed.get("used_pct")
+    start = parsed.get("period_start")
+    end = parsed.get("period_end")
+    same_window = False
+    if used is None and (start is not None or end is not None):
+        # proto3 omits a default 0.0 float, so a genuinely rolled window does
+        # arrive without field 1. But xAI ALSO drops the field on a spent pool
+        # while keeping the SAME bounds (CLI then gets HTTP 402 "Grok Build
+        # usage balance exhausted"). The card shows REMAINING = 100 - used, so
+        # reading that absence as 0% renders a green 100% — the exact inverse of
+        # the truth, and only ever at the moment the quota dies. Substitute the
+        # proto3 default only when the window is provably newer than the last one.
+        if _period_is_new(_read_usage_cache(home), start, end):
+            used = 0.0
+        else:
+            same_window = True
+
     if used is None:
         r.status = Status.ERROR
-        r.reason = "нет credit_usage_percent в gRPC"
+        if same_window:
+            r.reason = "xAI не отдал % на том же окне · последнее известное"
+            r.meta["percent_missing"] = "same window (pool likely spent)"
+        else:
+            r.reason = "нет credit_usage_percent в gRPC"
         _maybe_stale(r.reason)
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
     used_f = float(used)
-    # proto3: omitted percent = 0 is valid
-    end = parsed.get("period_end")
-    start = parsed.get("period_start")
     lbl = _period_label(start, end)
     reset = format_reset_epoch(end) if end else ""
     reset_at = format_reset_at_epoch(end) if end else ""
