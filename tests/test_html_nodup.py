@@ -42,6 +42,30 @@ def test_no_duplicate_week_or_date_in_panel():
     assert "chip-filter" in html
 
 
+def test_grok_ended_card_shows_free_zero_not_supergrok():
+    r = ProfileResult(
+        id="grok-personal",
+        family="grok",
+        label="GROK/personal",
+        status=Status.LIVE,
+        plan="Free",
+        reason="подписка закончилась",
+        windows=[Window("ended", used_pct=100.0, rem_pct=0.0, reset="", reset_at="")],
+    )
+    html = render_dashboard_html([r], 10.0, theme="dark", live=False)
+    start = html.find('data-label="grok/personal"')
+    assert start > 0
+    end = html.find("Offline / auth", start)
+    if end < 0:
+        end = html.find("<script", start)
+    body = html[start:end]
+    assert "SuperGrok" not in body
+    assert "Free" in body
+    assert "подписка закончилась" in body
+    assert 'class="stat-value"' in body and ">0%</div>" in body
+    assert 'class="stat-value"' in body and ">100%</div>" not in body
+
+
 def test_live_badge_uses_poll_seconds():
     r = ProfileResult(
         id="grok-work",
@@ -50,9 +74,7 @@ def test_live_badge_uses_poll_seconds():
         status=Status.LIVE,
         windows=[Window("7d", used_pct=50, rem_pct=50, reset="2d", reset_at="")],
     )
-    html = render_dashboard_html(
-        [r], 10.0, theme="dark", live=True, poll_seconds=60
-    )
+    html = render_dashboard_html([r], 10.0, theme="dark", live=True, poll_seconds=60)
     assert "Live · 1m" in html  # 60s → compact 1m
     assert "Auto · 60s" not in html
     assert "Weekly limit remaining" in html

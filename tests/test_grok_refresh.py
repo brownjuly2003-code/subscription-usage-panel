@@ -21,20 +21,25 @@ def _allow_panel_oidc(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PANEL_GROK_OIDC_REFRESH", "1")
 
 
-def _fake_jwt(exp: float) -> str:
+def _fake_jwt(exp: float, *, tier: int | None = 1) -> str:
     import base64
 
     def b64(obj: dict) -> str:
         raw = json.dumps(obj, separators=(",", ":")).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    return f"{b64({'alg': 'none'})}.{b64({'exp': exp})}.sig"
+    payload: dict = {"exp": exp}
+    if tier is not None:
+        payload["tier"] = tier
+    return f"{b64({'alg': 'none'})}.{b64(payload)}.sig"
 
 
-def _write_auth(home: Path, *, exp: float, refresh: str = "rt-old") -> None:
+def _write_auth(
+    home: Path, *, exp: float, refresh: str = "rt-old", tier: int | None = 1
+) -> None:
     home.mkdir(parents=True, exist_ok=True)
     entry = {
-        "key": _fake_jwt(exp),
+        "key": _fake_jwt(exp, tier=tier),
         "email": "t@example.com",
         "team_id": "team-1",
         "refresh_token": refresh,
@@ -324,6 +329,87 @@ def test_omitted_used_pct_without_history_is_unknown_not_full(
     r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
     assert r.status == Status.ERROR
     assert not r.windows
+
+
+def test_free_tier_omitted_percent_is_ended_not_full_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lapsed SuperGrok: Free still has a calendar window and no percent.
+
+    That used to look like a proto3 roll → green 100% SuperGrok remaining.
+    """
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() + 7200, tier=None)
+    prev_end = time.time() - 60
+    grok_mod._save_usage_cache(
+        home,
+        used_pct=0.0,
+        rem_pct=100.0,
+        period_label="7d",
+        period_start=prev_end - 7 * 86400,
+        period_end=prev_end,
+        email="t@example.com",
+        plan="SuperGrok",
+    )
+    start = time.time() - 30
+    client = _omitted_pct_client(monkeypatch, start, start + 7 * 86400)
+
+    r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
+    assert r.status == Status.LIVE
+    assert r.plan == "Free"
+    assert r.windows
+    assert abs(r.windows[0].rem_pct - 0.0) < 1e-6
+    assert abs(r.windows[0].used_pct - 100.0) < 1e-6
+    assert not r.windows[0].reset_at
+    assert "подписка закончилась" in (r.reason or "")
+    cache = grok_mod._read_usage_cache(home)
+    assert cache is not None
+    assert abs(float(cache["rem_pct"]) - 0.0) < 1e-6
+    assert cache.get("plan") == "Free"
+
+
+def test_settings_free_overrides_stale_supergrok_jwt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remote settings is the live tier; JWT can lag after cancel."""
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() + 7200, tier=1)
+    start = time.time() - 30
+    client = _omitted_pct_client(monkeypatch, start, start + 7 * 86400)
+    settings = MagicMock()
+    settings.status_code = 200
+    settings.json.return_value = {"subscription_tier_display": "Free"}
+    client.get.return_value = settings
+
+    r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
+    assert r.plan == "Free"
+    assert r.status == Status.LIVE
+    assert r.windows and abs(r.windows[0].rem_pct - 0.0) < 1e-6
+
+
+def test_stale_supergrok_cache_ignored_when_live_plan_is_free(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / ".grok"
+    _write_auth(home, exp=time.time() - 10, refresh="rt-dead", tier=None)
+    end = time.time() + 3 * 86400
+    grok_mod._save_usage_cache(
+        home,
+        used_pct=0.0,
+        rem_pct=100.0,
+        period_label="7d",
+        period_start=end - 7 * 86400,
+        period_end=end,
+        email="t@example.com",
+        plan="SuperGrok",
+    )
+    grok_mod._mark_rt_dead(home, "rt-dead", "revoked")
+    client = MagicMock(spec=httpx.Client)
+    r = grok_mod.fetch_grok("grok-personal", "GROK/personal", home, client, 5.0)
+    assert r.plan == "Free"
+    # Must not paint the cached SuperGrok 100% as last known.
+    if r.windows:
+        assert r.windows[0].rem_pct < 1.0
 
 
 def test_empty_grpc_still_errors_without_cache(

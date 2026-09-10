@@ -35,8 +35,20 @@ from panel.timefmt import (
 
 
 GRPC_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
+SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 DEFAULT_OIDC_ISSUER = "https://auth.x.ai"
 DEFAULT_OIDC_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+# JWT `tier` claim from grok-build (OAuth free omits the claim or sends 0).
+_JWT_TIER_NAMES = {
+    0: "Free",
+    1: "SuperGrok",
+    2: "X Basic",
+    3: "X Premium",
+    4: "X Premium+",
+    5: "SuperGrok Heavy",
+    6: "SuperGrok Lite",
+    7: "SuperGrok Plus",
+}
 # Only treat token as needing refresh when almost dead. Panel must NOT race the
 # CLI for rotating refresh_tokens (that burned personal RT). Prefer CLI as sole writer.
 REFRESH_SKEW_S = 180.0
@@ -55,18 +67,82 @@ RT_DEAD_NAME = ".panel-rt-dead.json"
 _ENV_OIDC = "PANEL_GROK_OIDC_REFRESH"
 
 
-def _jwt_exp(token: str) -> Optional[float]:
+def _jwt_claims(token: str) -> dict[str, Any]:
     if not token or token.count(".") != 2:
-        return None
+        return {}
     try:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload))
-        if "exp" in claims:
-            return float(claims["exp"])
+        return claims if isinstance(claims, dict) else {}
     except Exception:
+        return {}
+
+
+def _jwt_exp(token: str) -> Optional[float]:
+    claims = _jwt_claims(token)
+    if "exp" not in claims:
         return None
-    return None
+    try:
+        return float(claims["exp"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _jwt_tier(token: str) -> Optional[int]:
+    claims = _jwt_claims(token)
+    if "tier" not in claims:
+        return None
+    try:
+        return int(claims["tier"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _plan_from_jwt(token: str) -> str:
+    """OAuth free omits `tier`; that is Free, not SuperGrok."""
+    tier = _jwt_tier(token)
+    if tier is None:
+        return "Free"
+    return _JWT_TIER_NAMES.get(tier, f"tier {tier}")
+
+
+def _is_paid_supergrok(plan: str) -> bool:
+    compact = "".join((plan or "").lower().split())
+    return compact.startswith("supergrok")
+
+
+def _fetch_plan(client: httpx.Client, key: str, timeout: float) -> Tuple[str, str]:
+    """Live display name from /v1/settings, else JWT tier.
+
+    Settings is the same RemoteSettings field the CLI logs as subscriptionTier.
+    JWT can lag a cancelled plan until the next access-token rotation.
+    """
+    if key:
+        try:
+            resp = client.get(
+                SETTINGS_URL,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Accept": "application/json",
+                    "x-xai-token-auth": "xai-grok-cli",
+                    "User-Agent": "grok-cli",
+                },
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict):
+                    display = str(
+                        data.get("subscription_tier_display")
+                        or data.get("subscription_tier")
+                        or ""
+                    ).strip()
+                    if display:
+                        return display, "settings"
+        except Exception:
+            pass
+    return _plan_from_jwt(key), "jwt"
 
 
 def _auth_path(home: Path) -> Path:
@@ -529,6 +605,7 @@ def _save_usage_cache(
     period_start: Optional[float],
     period_end: Optional[float],
     email: str,
+    plan: str = "",
 ) -> None:
     """Persist last good SuperGrok pool so AUTH blips do not blank the card."""
     payload = {
@@ -538,6 +615,7 @@ def _save_usage_cache(
         "period_start": period_start,
         "period_end": period_end,
         "email": email,
+        "plan": plan,
         "saved_at": time.time(),
     }
     try:
@@ -789,8 +867,33 @@ def fetch_grok(
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
+    def _apply_ended(*, live: bool) -> None:
+        """No SuperGrok pool: remaining is 0, never a green 100%."""
+        r.plan = r.plan or "Free"
+        r.status = Status.LIVE if live else Status.STALE
+        r.reason = "подписка закончилась"
+        r.windows = [
+            Window(label="ended", used_pct=100.0, rem_pct=0.0, reset="", reset_at="")
+        ]
+        r.meta["source"] = "no SuperGrok pool"
+        if live:
+            _save_usage_cache(
+                home,
+                used_pct=100.0,
+                rem_pct=0.0,
+                period_label="pool",
+                period_start=None,
+                period_end=None,
+                email=r.email or "",
+                plan=r.plan,
+            )
+
     def _maybe_stale(reason: str) -> bool:
         """Keep last known SuperGrok pool on the card — dashboard needs no re-login."""
+        if r.plan and not _is_paid_supergrok(r.plan):
+            # Live tier is Free. Do not resurrect a SuperGrok remaining %.
+            _apply_ended(live=False)
+            return True
         cache = _load_usage_cache(home)
         if not cache:
             return False
@@ -801,7 +904,7 @@ def fetch_grok(
         r.status = Status.STALE
         # Calm copy: panel stays useful without interactive login.
         r.reason = reason or "last known (session idle)"
-        r.plan = r.plan or "SuperGrok"
+        r.plan = r.plan or str(cache.get("plan") or "")
         if not r.email and cache.get("email"):
             r.email = str(cache["email"])
         r.meta["source"] = "local .panel-grok-usage.json (not live)"
@@ -819,6 +922,16 @@ def fetch_grok(
         ):
             r.meta["rt_refresh"] = "paused"
 
+    now = time.time()
+    if key:
+        token_ok = exp is None or exp > now
+        if token_ok:
+            plan, plan_source = _fetch_plan(client, key, timeout)
+        else:
+            plan, plan_source = _plan_from_jwt(key), "jwt"
+        r.plan = plan
+        r.meta["plan_source"] = plan_source
+
     if not key:
         r.status = Status.DEAD
         r.reason = "нет OIDC-токена"
@@ -835,7 +948,6 @@ def fetch_grok(
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
-    now = time.time()
     if exp is not None and exp <= now:
         # Access JWT gone. Prefer STALE cache over AUTH/login nag.
         r.status = Status.AUTH
@@ -926,7 +1038,14 @@ def fetch_grok(
     used = parsed.get("used_pct")
     start = parsed.get("period_start")
     end = parsed.get("period_end")
+    paid = _is_paid_supergrok(r.plan)
     same_window = False
+    if used is None and not paid:
+        # Free / ended SuperGrok still ships a calendar currentPeriod. That is
+        # not a proto3 0% used on a SuperGrok pool — there is no pool.
+        _apply_ended(live=True)
+        r.latency_ms = (time.perf_counter() - t0) * 1000
+        return r
     if used is None and (start is not None or end is not None):
         # proto3 omits a default 0.0 float, so a genuinely rolled window does
         # arrive without field 1. But xAI ALSO drops the field on a spent pool
@@ -966,7 +1085,7 @@ def fetch_grok(
             reset_at=reset_at,
         )
     ]
-    r.plan = "SuperGrok"
+    r.plan = r.plan or "SuperGrok"
     r.status = Status.LIVE
     r.meta["source"] = "subscription GetGrokCreditsConfig"
     r.meta["used_pct"] = used_f
@@ -987,6 +1106,7 @@ def fetch_grok(
         period_start=float(start) if start is not None else None,
         period_end=float(end) if end is not None else None,
         email=r.email or "",
+        plan=r.plan,
     )
 
     r.latency_ms = (time.perf_counter() - t0) * 1000

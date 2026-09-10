@@ -1,4 +1,5 @@
 """Grafana-dark replica HTML for subscription remaining (max visual fidelity)."""
+
 from __future__ import annotations
 
 import html
@@ -19,6 +20,7 @@ G = {
     "purple": "#B877D9",
     "super": "#8AB8FF",
 }
+
 
 def _family_colors() -> dict[str, str]:
     try:
@@ -65,8 +67,12 @@ def _window_human(label: str) -> str:
         "1d": "day",
         "mo": "month",
         "pool": "period",
+        "ended": "",
     }
-    return m.get((label or "").lower(), label or "period")
+    key = (label or "").lower()
+    if not key:
+        return ""
+    return m.get(key, label or "period")
 
 
 def _human_interval(seconds: int) -> str:
@@ -163,9 +169,7 @@ def _cards(results: List[ProfileResult]) -> tuple[list[dict], list[dict]]:
             for w in r.windows
         ]
         main = [
-            w
-            for w in wins
-            if not (w["used_pct"] <= 0.01 and w["rem_pct"] >= 99.9)
+            w for w in wins if not (w["used_pct"] <= 0.01 and w["rem_pct"] >= 99.9)
         ] or wins
         primary = min(main, key=lambda x: x["rem_pct"])
         live.append(
@@ -175,6 +179,7 @@ def _cards(results: List[ProfileResult]) -> tuple[list[dict], list[dict]]:
                 "color": color,
                 "plan": r.plan or "",
                 "status": r.status.value,
+                "reason": r.reason or "",
                 "primary": primary,
                 "windows": main,
             }
@@ -228,14 +233,14 @@ def render_dashboard_html(
             f'page reloads on the same cadence to pick it up">'
             f'<span class="live-dot"></span>Data · {data_label}</span>'
         )
-        refresh_banner = f'''
+        refresh_banner = f"""
       <div id="snapBanner" style="margin:0 16px 8px;padding:8px 12px;border-radius:4px;border:1px solid var(--gf-border-weak);background:var(--gf-primary-bg);color:var(--gf-text-secondary);font-size:12px;">
         Snapshot as of <b style="color:var(--gf-text-primary)">{_esc(now)}</b>
         · data rewrite ~{data_label} (Task Scheduler / Open Dashboard)
         · page reloads every {poll_label} to re-read this file
         · instant pull: <code>Open Dashboard.bat</code>
       </div>
-      '''
+      """
         refresh_footer = (
             f"Data rewrite ~{data_label} (scheduled task). "
             f"Page reloads every {poll_label} to re-read dashboard.html from disk."
@@ -249,7 +254,9 @@ def render_dashboard_html(
     alerts = payload.get("alerts") or []
     live_n = sum(1 for r in results if r.status == Status.LIVE)
     total = len(results)
-    families_present = sorted({c["family"] for c in live_cards} | {o["family"] for o in offline})
+    families_present = sorted(
+        {c["family"] for c in live_cards} | {o["family"] for o in offline}
+    )
     family_chips = "".join(
         f'<button type="button" class="chip chip-filter" data-family="{_esc(f)}">{_esc(f)}</button>'
         for f in families_present
@@ -262,7 +269,7 @@ def render_dashboard_html(
         for a in alerts[:8]:
             lvl = a.get("level") or "warn"
             items.append(
-                f'<div class="alert-item { _esc(lvl) }">{_esc(a.get("message") or "")}</div>'
+                f'<div class="alert-item {_esc(lvl)}">{_esc(a.get("message") or "")}</div>'
             )
         alert_html = f'<div class="alert-strip">{"".join(items)}</div>'
 
@@ -281,20 +288,30 @@ def render_dashboard_html(
         spark = _sparkline_svg(rem, col, history=hist)
         plan = _esc(c["plan"]) if c["plan"] else ""
         period = _window_human(p.get("label") or "")
+        # A cached number must never look like a fresh measurement. The chip sits
+        # under the value, not in the header, so it cannot ellipsize the profile name.
+        stale_chip = (
+            '<span class="panel-stale" title="cached value, not a live reading">last known</span>'
+            if c.get("status") == "stale"
+            else ""
+        )
         # Week is stated once in the toolbar; non-week primaries still need a hint.
+        period_txt = "" if period == "week" else _esc(period)
         period_line = (
-            ""
-            if period == "week"
-            else f'<div class="stat-title">{_esc(period)}</div>'
+            f'<div class="stat-title">{f"{period_txt} {stale_chip}".strip()}</div>'
+            if (period_txt or stale_chip)
+            else ""
         )
 
         # reset once: absolute date preferred, relative only if no date
         if p.get("reset_at"):
-            reset_line = f'reset <b>{_esc(p["reset_at"])}</b>'
+            reset_line = f"reset <b>{_esc(p['reset_at'])}</b>"
             if p.get("reset") and p["reset"] not in ("—", ""):
-                reset_line += f' · in {_esc(p["reset"])}'
+                reset_line += f" · in {_esc(p['reset'])}"
         elif p.get("reset") and p["reset"] not in ("—", ""):
-            reset_line = f'reset in <b>{_esc(p["reset"])}</b>'
+            reset_line = f"reset in <b>{_esc(p['reset'])}</b>"
+        elif c.get("reason"):
+            reset_line = f"<b>{_esc(c['reason'])}</b>"
         else:
             reset_line = "reset <b>—</b>"
 
@@ -308,13 +325,13 @@ def render_dashboard_html(
             if w.get("reset_at"):
                 wr = _esc(w["reset_at"])
             elif w.get("reset"):
-                wr = f'in {_esc(w["reset"])}'
+                wr = f"in {_esc(w['reset'])}"
             else:
                 wr = "—"
             extras.append(
                 f"""<div class="extra-row">
               <span class="extra-period">{_esc(wperiod)}</span>
-              <span class="extra-rem" style="color:{wc}">{_esc(fmt_pct(w['rem_pct'], 2))} left</span>
+              <span class="extra-rem" style="color:{wc}">{_esc(fmt_pct(w["rem_pct"], 2))} left</span>
               <span class="extra-reset">{wr}</span>
             </div>"""
             )
@@ -325,12 +342,12 @@ def render_dashboard_html(
 
         stat_panels.append(
             f"""
-      <div class="panel panel-stat" data-family="{_esc(c['family'])}" data-label="{_esc(c['label']).lower()}" data-kind="live">
+      <div class="panel panel-stat" data-family="{_esc(c["family"])}" data-label="{_esc(c["label"]).lower()}" data-kind="live">
         <div class="panel-header">
           <div class="panel-title">
-            <span class="series-dot" style="background:{c['color']}"></span>
-            <span class="panel-title-text">{_esc(c['label'])}</span>
-            {f'<span class="panel-desc">{plan}</span>' if plan else ''}
+            <span class="series-dot" style="background:{c["color"]}"></span>
+            <span class="panel-title-text">{_esc(c["label"])}</span>
+            {f'<span class="panel-desc">{plan}</span>' if plan else ""}
           </div>
           <div class="panel-menu" aria-hidden="true">
             <span></span><span></span><span></span>
@@ -366,10 +383,10 @@ def render_dashboard_html(
         for o in offline:
             rows.append(
                 f"""<tr>
-            <td><span class="series-dot" style="background:{o['color']}"></span>{_esc(o['label'])}</td>
-            <td class="mono status">{_esc(o['status'])}</td>
-            <td class="weak">{_esc(o['reason'])}</td>
-            <td class="weak">{_esc(o['plan'])}</td>
+            <td><span class="series-dot" style="background:{o["color"]}"></span>{_esc(o["label"])}</td>
+            <td class="mono status">{_esc(o["status"])}</td>
+            <td class="weak">{_esc(o["reason"])}</td>
+            <td class="weak">{_esc(o["plan"])}</td>
           </tr>"""
             )
         table_panel = f"""
@@ -392,7 +409,7 @@ def render_dashboard_html(
               </tr>
             </thead>
             <tbody>
-              {''.join(rows)}
+              {"".join(rows)}
             </tbody>
           </table>
         </div>
@@ -788,6 +805,21 @@ def render_dashboard_html(
     letter-spacing: 0.03em;
     margin-left: 4px;
   }}
+  .panel-stale {{
+    color: var(--gf-text-secondary);
+    background: rgba(255, 152, 48, 0.14);
+    border: 1px solid rgba(255, 152, 48, 0.38);
+    border-radius: 3px;
+    padding: 0 5px;
+    font-size: 10px;
+    line-height: 15px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-left: 6px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }}
   .series-dot {{
     width: 8px;
     height: 8px;
@@ -971,7 +1003,7 @@ def render_dashboard_html(
         <div class="nav-spacer"></div>
         <div class="nav-meta">
           <span>live <b>{live_n}/{total}</b></span>
-          <span>query <b>{wall_ms/1000:.1f}s</b></span>
+          <span>query <b>{wall_ms / 1000:.1f}s</b></span>
         </div>
       </header>
 
@@ -1004,7 +1036,7 @@ def render_dashboard_html(
         </div>
         {alert_html}
         <div class="row" id="liveGrid">
-          {''.join(stat_panels)}
+          {"".join(stat_panels)}
         </div>
         {table_panel}
       </div>

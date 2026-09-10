@@ -1,4 +1,5 @@
 """Versioned JSON schema for agents and dashboards (sup.v1)."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -25,13 +26,17 @@ def _window_dict(w) -> dict[str, Any]:
 
 
 def _period_name(label: str) -> str:
+    key = (label or "").lower()
+    if not key:
+        return ""
     return {
         "7d": "week",
         "5h": "5 hours",
         "1d": "day",
         "mo": "month",
         "pool": "period",
-    }.get((label or "").lower(), label or "period")
+        "ended": "",
+    }.get(key, label or "period")
 
 
 def primary_remaining(r: ProfileResult) -> float | None:
@@ -94,6 +99,7 @@ def build_payload(
         }
         profiles.append(entry)
         if level in ("critical", "warn") and rem is not None:
+            ended = (r.reason or "") == "подписка закончилась"
             alerts.append(
                 {
                     "level": level,
@@ -101,7 +107,11 @@ def build_payload(
                     "label": r.label,
                     "remaining_pct": round(rem, 4),
                     "reset_at": pw.reset_at if pw else None,
-                    "message": f"{r.label}: {rem:.1f}% remaining",
+                    "message": (
+                        f"{r.label}: {r.reason}"
+                        if ended
+                        else f"{r.label}: {rem:.1f}% remaining"
+                    ),
                 }
             )
         elif r.status in (Status.AUTH, Status.DEAD) and r.family in (
@@ -142,7 +152,9 @@ def build_payload(
         return (order.get(p["urgency"], 9), rem if rem is not None else 999)
 
     profiles.sort(key=sort_key)
-    alerts.sort(key=lambda a: {"critical": 0, "warn": 1, "offline": 2}.get(a["level"], 9))
+    alerts.sort(
+        key=lambda a: {"critical": 0, "warn": 1, "offline": 2}.get(a["level"], 9)
+    )
 
     live_n = sum(1 for r in results if r.status == Status.LIVE)
     crit_n = sum(1 for a in alerts if a["level"] == "critical")
