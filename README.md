@@ -62,9 +62,9 @@ python limits.py --workers 32 --html --open
 
 Rules live in **`panel/catalog.yaml`** (extend without rewriting core code):
 
-- **Implemented fetchers:** `claude`, `codex`, `grok`, `gemini`, `kimi`, `openrouter`, `openai`, `github`
+- **Implemented fetchers:** `claude`, `codex`, `grok`, `gemini`, `kimi`, `openrouter`, `openai`, `github`, `zai`
 - **Discoverable stubs** (home/env detected, remaining when you add a fetcher or token works later):  
-  `cursor`, `copilot`, `amp`, `opencode`, `zai`, `minimax`, `windsurf`, `continue`, `aider`, `litellm`, `anthropic_api`
+  `cursor`, `copilot`, `amp`, `opencode`, `minimax`, `windsurf`, `continue`, `aider`, `litellm`, `anthropic_api`
 
 A user with no local Cursor/Gemini today still benefits: **tomorrow’s homes appear automatically**.
 

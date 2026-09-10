@@ -1,4 +1,5 @@
 """Provider registry — built-ins + catalog stubs for optional families."""
+
 from __future__ import annotations
 
 from typing import Callable
@@ -14,6 +15,7 @@ from .kimi import fetch_kimi
 from .openai_api import fetch_openai_api
 from .openrouter import fetch_openrouter
 from .stub import make_stub
+from .zai import fetch_zai
 
 FETCHERS: dict[str, Callable] = {
     "claude": fetch_claude,
@@ -24,6 +26,7 @@ FETCHERS: dict[str, Callable] = {
     "openrouter": fetch_openrouter,
     "openai": fetch_openai_api,
     "github": fetch_github,
+    "zai": fetch_zai,
 }
 
 

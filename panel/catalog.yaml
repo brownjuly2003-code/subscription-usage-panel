@@ -125,9 +125,9 @@ families:
     color: "#EC4899"
     color_rgb: "236;72;153"
     home_prefixes: [".zai", ".z-ai"]
-    credential_files: ["auth.json", "credentials.json", "api_key"]
-    env_keys: ["ZAI_API_KEY", "Z_AI_API_KEY"]
-    optional_fetcher: true
+    credential_files: ["auth.json", "credentials.json", "api_key", "key"]
+    env_keys: ["ZAI_API_KEY", "Z_AI_API_KEY", "GLM_API_KEY"]
+    notes: "GLM Coding Plan 5h / weekly credits"
 
   minimax:
     label: MiniMax

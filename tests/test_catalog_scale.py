@@ -25,6 +25,9 @@ def test_discover_scales_many_homes(tmp_path: Path, monkeypatch):
         "OPENAI_API_KEY",
         "GH_TOKEN",
         "GITHUB_TOKEN",
+        "ZAI_API_KEY",
+        "Z_AI_API_KEY",
+        "GLM_API_KEY",
     ):
         monkeypatch.delenv(e, raising=False)
 

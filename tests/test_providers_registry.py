@@ -12,6 +12,7 @@ def test_popular_families_registered():
         "openrouter",
         "openai",
         "github",
+        "zai",
     ):
         assert need in fams
         assert callable(FETCHERS[need])

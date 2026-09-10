@@ -40,6 +40,7 @@ def _family_colors() -> dict[str, str]:
         "openrouter": "#A78BFA",
         "openai": "#10A37F",
         "github": "#8B949E",
+        "zai": "#EC4899",
     }
 
 

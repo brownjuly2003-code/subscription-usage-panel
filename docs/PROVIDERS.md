@@ -12,6 +12,7 @@ Built-in families (register more via `register_provider` / `register_family`):
 | **openrouter** | `~/.openrouter*` | `OPENROUTER_API_KEY` | key limit remaining |
 | **openai** | `~/.openai*` | `OPENAI_API_KEY` | key valid (plan → codex) |
 | **github** | env / `gh` hosts | `GH_TOKEN` | REST rate limit remaining |
+| **zai** | `~/.zai*` | `ZAI_API_KEY` / home `api_key` | GLM Coding Plan 5h / 7d credits |
 
 ## Notes
 
@@ -73,7 +74,7 @@ has no percent; the card was green **100% SuperGrok**. Plan comes from
 omits the claim). Free / non-SuperGrok → remaining **0%**, label **Free**, no reset
 date, never SuperGrok 100%.
 
-**Not refreshed (by design):** API keys (OpenRouter, OpenAI key, Gemini key, Kimi key, `GH_TOKEN`) — they do not use this OIDC path. Gemini OAuth has no silent refresh here yet (re-login via Gemini CLI).
+**Not refreshed (by design):** API keys (OpenRouter, OpenAI key, Gemini key, Kimi key, z.ai key, `GH_TOKEN`) — they do not use this OIDC path. Gemini OAuth has no silent refresh here yet (re-login via Gemini CLI).
 
 ## Contract
 
