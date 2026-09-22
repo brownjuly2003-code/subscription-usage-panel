@@ -4,11 +4,13 @@ from __future__ import annotations
 import base64
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
 
+from panel.models import Status
 from panel.providers import claude as claude_mod
 from panel.providers import codex as codex_mod
 
@@ -108,3 +110,39 @@ def test_claude_refresh_when_expired(tmp_path: Path) -> None:
     saved = json.loads((home / ".credentials.json").read_text(encoding="utf-8"))
     assert saved["claudeAiOauth"]["refreshToken"] == "rt-new"
     assert saved["claudeAiOauth"]["accessToken"] == "new-tok"
+
+
+def test_claude_without_oauth_does_not_present_cached_limits_as_current(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / ".claude"
+    home.mkdir()
+    credentials = {
+        "claudeAiOauth": {
+            "accessToken": "",
+            "refreshToken": "",
+            "expiresAt": 0,
+            "subscriptionType": "max",
+            "rateLimitTier": "default_claude_max_5x",
+        }
+    }
+    (home / ".credentials.json").write_text(
+        json.dumps(credentials), encoding="utf-8"
+    )
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    cache = {
+        "five_hour": {"utilization": 0, "resets_at": future},
+        "seven_day": {"utilization": 100, "resets_at": future},
+    }
+    (home / ".usage-cache.json").write_text(json.dumps(cache), encoding="utf-8")
+
+    client = MagicMock(spec=httpx.Client)
+    result = claude_mod.fetch_claude(
+        "claude-default", "CLAUDE/personal", home, client, 5.0
+    )
+
+    assert result.status == Status.DEAD
+    assert result.windows == []
+    assert "claude login" in result.reason
+    client.get.assert_not_called()
+    client.post.assert_not_called()

@@ -280,14 +280,9 @@ def fetch_claude(
         r.meta["auth_refresh"] = refresh_note
     if not tok:
         r.status = Status.DEAD
-        r.reason = "нет OAuth-токена"
+        r.reason = "лимит недоступен: войдите в Claude Code (claude login)"
         if refresh_note and refresh_note not in ("ok", "oauth_refreshed"):
-            r.reason = f"нет OAuth-токена ({refresh_note})"
-        _maybe_stale("кэш (нет токена)")
-        if r.status != Status.STALE and not (
-            refresh_note and refresh_note not in ("ok", "oauth_refreshed")
-        ):
-            r.reason = "нет OAuth-токена (live нет; кэш протух)"
+            r.reason = f"лимит недоступен: {refresh_note} (claude login)"
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 

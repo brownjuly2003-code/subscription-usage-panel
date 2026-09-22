@@ -69,5 +69,5 @@ def load_series(profile_id: str, limit: int = 48) -> list[dict[str, Any]]:
 def attach_history(payload: dict[str, Any]) -> dict[str, Any]:
     """Mutate payload profiles with history series for sparklines."""
     for p in payload.get("profiles") or []:
-        p["history"] = load_series(p["id"])
+        p["history"] = load_series(p["id"]) if p.get("primary") else []
     return payload

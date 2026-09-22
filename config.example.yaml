@@ -5,7 +5,7 @@ interval: 60
 timeout_s: 8
 workers: 16          # parallel fetches (raise toward 32–64 for huge fleets)
 show_dead: true
-only_live: false
+only_live: false     # true = emit Status.LIVE profiles only in every output mode
 auto_discover: true  # scan ~ using panel/catalog.yaml
 theme: dark          # dark | light
 
@@ -13,7 +13,11 @@ theme: dark          # dark | light
 # families: [claude, codex, grok, gemini, kimi]
 # profiles_filter: [codex-work, grok-personal]
 
-# Explicit profiles merge with discovery (same home → explicit wins)
+# Curated mode: set auto_discover: false and keep only current subscriptions
+# in this explicit allowlist. Remove or disable a profile when its subscription ends.
+# With only_live: false, a current subscription stays visible when its quota API
+# is temporarily unavailable; the panel shows the auth/error reason, never fake limits.
+# With discovery enabled, explicit profiles merge with discovery (same home wins).
 # profiles:
 #   - id: codex-work
 #     family: codex

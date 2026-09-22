@@ -54,6 +54,8 @@ def fetch_all(cfg: AppConfig) -> tuple[list[ProfileResult], float]:
                     )
                 )
 
+    if cfg.only_live:
+        results = [r for r in results if r.status == Status.LIVE]
     wall = (time.perf_counter() - t0) * 1000
     results.sort(key=lambda r: r.sort_key)
     return results, wall

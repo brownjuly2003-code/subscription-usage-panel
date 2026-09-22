@@ -94,7 +94,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--only-live",
         action="store_true",
-        help="hide offline/auth profiles in terminal/HTML snapshot",
+        help="emit live profiles only in terminal, JSON, HTML, and server output",
     )
     p.add_argument(
         "--workers",

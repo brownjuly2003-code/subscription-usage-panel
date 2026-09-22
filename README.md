@@ -58,6 +58,31 @@ python limits.py --only-live
 python limits.py --workers 32 --html --open
 ```
 
+`--only-live` is strict and applies to terminal, JSON, HTML snapshots, and the
+live server: cached (`stale`), auth, error, and dead profiles are omitted.
+
+### Current subscriptions only
+
+For a personal panel, use `profiles` as an explicit allowlist and turn discovery
+off. Add an entry when you start a subscription; remove it or set
+`enabled: false` when the subscription ends:
+
+```yaml
+auto_discover: false
+show_dead: true
+only_live: false
+profiles:
+  - id: claude-personal
+    family: claude
+    label: CLAUDE/personal
+    home: ~/.claude
+    enabled: true
+```
+
+Keep `only_live: false` in curated mode if you still want a current subscription
+listed while its provider login or quota endpoint is unavailable. The panel then
+shows the failure reason without presenting cached percentages as current data.
+
 ## Catalog of networks
 
 Rules live in **`panel/catalog.yaml`** (extend without rewriting core code):
