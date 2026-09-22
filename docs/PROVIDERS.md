@@ -31,11 +31,11 @@ Short-lived access tokens expire independently of the subscription pool. Claude 
 | **codex** | `~/.codex*/auth.json` → `tokens` | `auth.openai.com/oauth/token` |
 | **grok** | `~/.grok*/auth.json` → OIDC entry | `{issuer}/oauth2/token` (default `auth.x.ai`) |
 
-Refresh rotates `refresh_token` when the IdP returns a new one; the panel writes it back atomically (`.panel-tmp` → replace). If refresh fails (`invalid_grant` / revoked), status stays AUTH/DEAD until `claude login` / `codex login` / `grok login`.
+Refresh rotates `refresh_token` when the IdP returns a new one; the panel writes it back atomically (`.panel-tmp` → replace). If refresh fails (`invalid_grant` / revoked), status stays AUTH/DEAD until `claude auth login` / `codex login` / `grok login`.
 
 Claude cache is used only as an explicitly stale fallback after a live request
 fails. If both Claude OAuth tokens are absent, the profile is DEAD with a
-`claude login` instruction; old `.usage-cache.json` percentages are not shown as
+`claude auth login` instruction; old `.usage-cache.json` percentages are not shown as
 current subscription data even when their recorded reset time is still ahead.
 
 **Grok token ownership (important):** rotating `refresh_token` must have **one writer**.  

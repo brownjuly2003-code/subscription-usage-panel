@@ -280,9 +280,9 @@ def fetch_claude(
         r.meta["auth_refresh"] = refresh_note
     if not tok:
         r.status = Status.DEAD
-        r.reason = "лимит недоступен: войдите в Claude Code (claude login)"
+        r.reason = "лимит недоступен: войдите в Claude Code (claude auth login)"
         if refresh_note and refresh_note not in ("ok", "oauth_refreshed"):
-            r.reason = f"лимит недоступен: {refresh_note} (claude login)"
+            r.reason = f"лимит недоступен: {refresh_note} (claude auth login)"
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
 
@@ -329,11 +329,11 @@ def fetch_claude(
             err = resp.json().get("error") or {}
             msg = str(err.get("message") or "")
             if "organization" in msg.lower() or "oauth" in msg.lower():
-                r.reason = msg[:120] or "перелогинься (claude login)"
+                r.reason = msg[:120] or "перелогинься (claude auth login)"
             else:
-                r.reason = "перелогинься (claude login)"
+                r.reason = "перелогинься (claude auth login)"
         except Exception:
-            r.reason = "перелогинься (claude login)"
+            r.reason = "перелогинься (claude auth login)"
         _maybe_stale("401 · кэш")
         r.latency_ms = (time.perf_counter() - t0) * 1000
         return r
