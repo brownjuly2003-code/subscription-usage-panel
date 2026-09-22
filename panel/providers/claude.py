@@ -279,7 +279,7 @@ def fetch_claude(
     if refresh_note:
         r.meta["auth_refresh"] = refresh_note
     if not tok:
-        r.status = Status.DEAD
+        r.status = Status.AUTH
         r.reason = "лимит недоступен: войдите в Claude Code (claude auth login)"
         if refresh_note and refresh_note not in ("ok", "oauth_refreshed"):
             r.reason = f"лимит недоступен: {refresh_note} (claude auth login)"

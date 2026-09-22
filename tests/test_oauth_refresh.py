@@ -141,7 +141,7 @@ def test_claude_without_oauth_does_not_present_cached_limits_as_current(
         "claude-default", "CLAUDE/personal", home, client, 5.0
     )
 
-    assert result.status == Status.DEAD
+    assert result.status == Status.AUTH
     assert result.windows == []
     assert "claude auth login" in result.reason
     client.get.assert_not_called()
