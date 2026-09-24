@@ -300,7 +300,13 @@ def main(argv: list[str] | None = None) -> int:
             results = [r for r in results if r.status.value == "live"]
             payload = build_payload(results, wall, meta=payload.get("meta") or {})
         out = Path(args.html)
-        write_dashboard(results, wall, out, theme=cfg.theme)
+        write_dashboard(
+            results,
+            wall,
+            out,
+            theme=cfg.theme,
+            show_unavailable_cards=not cfg.auto_discover,
+        )
         print(
             f"Wrote {out.resolve()}  (profiles={len(results)}, "
             f"theme={cfg.theme}, workers={cfg.workers})"

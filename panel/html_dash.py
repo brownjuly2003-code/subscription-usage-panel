@@ -142,22 +142,23 @@ def _sparkline_svg(
     </svg>"""
 
 
-def _cards(results: List[ProfileResult]) -> tuple[list[dict], list[dict]]:
+def _cards(
+    results: List[ProfileResult], show_unavailable_cards: bool = False
+) -> tuple[list[dict], list[dict], list[dict]]:
     colors = _family_colors()
-    live, offline = [], []
+    live, unavailable, offline = [], [], []
     for r in results:
         color = colors.get(r.family, G["blue"])
         if r.status not in (Status.LIVE, Status.STALE) or not r.windows:
-            offline.append(
-                {
-                    "label": r.label,
-                    "family": r.family,
-                    "color": color,
-                    "status": r.status.value,
-                    "reason": r.reason or r.status.value,
-                    "plan": r.plan or "—",
-                }
-            )
+            item = {
+                "label": r.label,
+                "family": r.family,
+                "color": color,
+                "status": r.status.value,
+                "reason": r.reason or r.status.value,
+                "plan": r.plan or "—",
+            }
+            (unavailable if show_unavailable_cards else offline).append(item)
             continue
         wins = [
             {
@@ -186,7 +187,8 @@ def _cards(results: List[ProfileResult]) -> tuple[list[dict], list[dict]]:
             }
         )
     live.sort(key=lambda c: c["primary"]["rem_pct"])
-    return live, offline
+    unavailable.sort(key=lambda c: c["label"].lower())
+    return live, unavailable, offline
 
 
 def render_dashboard_html(
@@ -199,6 +201,7 @@ def render_dashboard_html(
     data_refresh_seconds: int = 300,
     payload: dict | None = None,
     live_port: int = 8765,
+    show_unavailable_cards: bool = False,
 ) -> str:
     """Render dashboard HTML.
 
@@ -247,7 +250,9 @@ def render_dashboard_html(
             f"Page reloads every {poll_label} to re-read dashboard.html from disk."
         )
 
-    live_cards, offline = _cards(results)
+    live_cards, unavailable_cards, offline = _cards(
+        results, show_unavailable_cards=show_unavailable_cards
+    )
     if payload is None:
         payload = build_payload(results, wall_ms, meta={"mode": "html"})
         append_snapshot(payload.get("profiles") or [])
@@ -256,8 +261,17 @@ def render_dashboard_html(
     live_n = sum(1 for r in results if r.status == Status.LIVE)
     total = len(results)
     families_present = sorted(
-        {c["family"] for c in live_cards} | {o["family"] for o in offline}
+        {c["family"] for c in live_cards}
+        | {c["family"] for c in unavailable_cards}
+        | {o["family"] for o in offline}
     )
+    count_parts = [f"{live_n} live"]
+    if unavailable_cards:
+        count_parts.append(f"{len(unavailable_cards)} unavailable")
+    if offline:
+        count_parts.append(f"{len(offline)} offline")
+    count_parts.append(f"{total} total")
+    filter_count = " · ".join(count_parts)
     family_chips = "".join(
         f'<button type="button" class="chip chip-filter" data-family="{_esc(f)}">{_esc(f)}</button>'
         for f in families_present
@@ -364,6 +378,34 @@ def render_dashboard_html(
             {spark}
           </div>
           {extras_html}
+        </div>
+      </div>"""
+        )
+
+    for c in unavailable_cards:
+        status = str(c["status"]).upper()
+        status_color = G["orange"] if c["status"] == "auth" else G["red"]
+        plan = _esc(c["plan"]) if c["plan"] and c["plan"] != "—" else ""
+        stat_panels.append(
+            f"""
+      <div class="panel panel-stat" data-family="{_esc(c["family"])}" data-label="{_esc(c["label"]).lower()}" data-kind="unavailable">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span class="series-dot" style="background:{c["color"]}"></span>
+            <span class="panel-title-text">{_esc(c["label"])}</span>
+            {f'<span class="panel-desc">{plan}</span>' if plan else ""}
+          </div>
+          <div class="panel-menu" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+        <div class="panel-content stat-content stat-unavailable">
+          <div class="stat-value-wrap">
+            <div class="stat-value stat-status-value" style="color:{status_color}">{_esc(status)}</div>
+            <div class="stat-title">quota unavailable</div>
+            <div class="stat-reason">{_esc(c["reason"])}</div>
+          </div>
+          <div class="stat-graph unavailable-graph" aria-hidden="true"></div>
         </div>
       </div>"""
         )
@@ -874,6 +916,10 @@ def render_dashboard_html(
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.02em;
   }}
+  .stat-status-value {{
+    font-size: 34px;
+    letter-spacing: 0.04em;
+  }}
   .stat-title {{
     margin-top: 2px;
     font-size: 13px;
@@ -891,6 +937,14 @@ def render_dashboard_html(
     color: var(--gf-text-secondary);
     font-weight: 500;
   }}
+  .stat-reason {{
+    max-width: 100%;
+    margin-top: 8px;
+    color: var(--gf-text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }}
   .stat-graph {{
     flex: 1;
     min-height: 56px;
@@ -901,6 +955,16 @@ def render_dashboard_html(
     width: 100%;
     height: 56px;
     display: block;
+  }}
+  .unavailable-graph {{
+    min-height: 40px;
+    opacity: 0.35;
+    background: linear-gradient(
+      to bottom,
+      transparent 49%,
+      var(--gf-border-medium) 50%,
+      transparent 51%
+    );
   }}
   .stat-extras {{
     margin-top: 8px;
@@ -1033,7 +1097,7 @@ def render_dashboard_html(
         <div class="filter-bar">
           <button type="button" class="chip chip-filter active" data-family="*">all</button>
           {family_chips}
-          <span class="filter-count" id="filterCount">{len(live_cards)} live · {len(offline)} offline · {total} total</span>
+          <span class="filter-count" id="filterCount">{_esc(filter_count)}</span>
         </div>
         {alert_html}
         <div class="row" id="liveGrid">
@@ -1163,6 +1227,7 @@ def write_dashboard(
     live_hint_port: int = 8765,
     payload: dict | None = None,
     data_refresh_seconds: int = 300,
+    show_unavailable_cards: bool = False,
 ) -> None:
     """Write static dashboard.html (file mode).
 
@@ -1178,6 +1243,7 @@ def write_dashboard(
             live_port=live_hint_port,
             payload=payload,
             data_refresh_seconds=data_refresh_seconds,
+            show_unavailable_cards=show_unavailable_cards,
         ),
         encoding="utf-8",
     )

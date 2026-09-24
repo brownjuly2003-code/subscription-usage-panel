@@ -58,6 +58,7 @@ def refresh(cfg: AppConfig) -> None:
             theme=cfg.theme,
             live_hint_port=STATE.port,
             payload=payload,
+            show_unavailable_cards=not cfg.auto_discover,
         )
     except Exception:
         pass
@@ -120,6 +121,7 @@ class Handler(BaseHTTPRequestHandler):
                 poll_seconds=max(15, int((cfg.interval if cfg else 60))),
                 payload=payload,
                 live_port=STATE.port,
+                show_unavailable_cards=bool(cfg and not cfg.auto_discover),
             )
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             return

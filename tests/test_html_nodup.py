@@ -78,3 +78,33 @@ def test_live_badge_uses_poll_seconds():
     assert "Live · 1m" in html  # 60s → compact 1m
     assert "Auto · 60s" not in html
     assert "Weekly limit remaining" in html
+
+
+def test_curated_auth_profile_renders_as_card_without_fake_percentage():
+    r = ProfileResult(
+        id="claude-default",
+        family="claude",
+        label="CLAUDE/personal",
+        status=Status.AUTH,
+        plan="max 5x",
+        reason="лимит недоступен: войдите в Claude Code (claude auth login)",
+    )
+
+    html = render_dashboard_html(
+        [r],
+        10.0,
+        theme="dark",
+        live=False,
+        show_unavailable_cards=True,
+    )
+
+    start = html.find('data-label="claude/personal"')
+    assert start > 0
+    end = html.find("</div>\n      </div>", start)
+    body = html[start:end]
+    assert 'data-kind="unavailable"' in body
+    assert ">AUTH</div>" in body
+    assert "max 5x" in body
+    assert "claude auth login" in body
+    assert "%" not in body
+    assert 'id="offlinePanel"' not in html
