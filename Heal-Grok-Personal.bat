@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal
 rem ============================================================
-rem  ONE-TIME fix for GROK/personal (uedomskikh@gmail.com)
+rem  ONE-TIME fix for GROK/personal (you@example.com)
 rem
 rem  Grok Build / work CLI uses  %USERPROFILE%\.grok-work
 rem  Personal panel card uses    %USERPROFILE%\.grok
@@ -24,7 +24,7 @@ if not exist "%EXE%" (
 
 echo.
 echo  Personal home: %GROK_HOME%
-echo  Expected email: uedomskikh@gmail.com
+echo  Expected email: you@example.com
 echo  Work home is DIFFERENT: %USERPROFILE%\.grok-work
 echo.
 

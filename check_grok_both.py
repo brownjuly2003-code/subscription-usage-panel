@@ -19,7 +19,7 @@ PROFILES = [
     {
         "label": "GROK/personal",
         "home": Path.home() / ".grok",
-        "expect_email": "uedomskikh@gmail.com",
+        "expect_email": "you@example.com",  # set to your Grok account email
     },
     {
         "label": "GROK/work",

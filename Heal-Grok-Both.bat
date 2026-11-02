@@ -5,12 +5,12 @@ cd /d "%~dp0"
 
 echo.
 echo  HEAL BOTH Grok panel profiles
-echo  - GROK/personal -^> %%USERPROFILE%%\.grok     (uedomskikh@gmail.com)
+echo  - GROK/personal -^> %%USERPROFILE%%\.grok     (you@example.com)
 echo  - GROK/work     -^> %%USERPROFILE%%\.grok-work (russelllovedirty@juniorr.us)
 echo  Only BROKEN homes open login.
 echo.
 
-call :heal_one "GROK/personal" "%USERPROFILE%\.grok" "uedomskikh@gmail.com"
+call :heal_one "GROK/personal" "%USERPROFILE%\.grok" "you@example.com"
 call :heal_one "GROK/work" "%USERPROFILE%\.grok-work" "russelllovedirty@juniorr.us"
 
 echo.
