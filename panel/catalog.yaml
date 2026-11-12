@@ -118,7 +118,7 @@ families:
     home_prefixes: [".opencode", ".config/opencode"]
     credential_files: ["auth.json", "credentials.json"]
     env_keys: ["OPENCODE_API_KEY"]
-    optional_fetcher: true
+    notes: "Zen prepaid balance; profile key_file overrides the CLI key"
 
   zai:
     label: z.ai

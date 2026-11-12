@@ -13,6 +13,7 @@ from .github import fetch_github
 from .grok import fetch_grok
 from .kimi import fetch_kimi
 from .openai_api import fetch_openai_api
+from .opencode import fetch_opencode
 from .openrouter import fetch_openrouter
 from .stub import make_stub
 from .zai import fetch_zai
@@ -27,6 +28,7 @@ FETCHERS: dict[str, Callable] = {
     "openai": fetch_openai_api,
     "github": fetch_github,
     "zai": fetch_zai,
+    "opencode": fetch_opencode,
 }
 
 

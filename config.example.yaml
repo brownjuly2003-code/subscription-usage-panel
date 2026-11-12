@@ -24,6 +24,14 @@ theme: dark          # dark | light
 #     label: CODEX/work
 #     home: ~/.codex-work
 #     enabled: true
+#   # Pay-as-you-go balance (money left, not %). key_file is optional and wins
+#   # over OPENCODE_API_KEY and the CLI auth.json key.
+#   - id: opencode-zen
+#     family: opencode
+#     label: OPENCODE/zen
+#     home: ~/.local/share/opencode
+#     key_file: ~/secrets/opencode_zen_key.txt
+#     enabled: true
 
 # Optional RGB overrides for terminal colors
 # colors:

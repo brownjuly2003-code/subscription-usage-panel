@@ -12,6 +12,35 @@ SCHEMA_VERSION = "sup.v1"
 # remaining thresholds
 WARN_REM = 20.0
 CRIT_REM = 10.0
+# prepaid money thresholds (USD) for balance-only profiles
+WARN_BALANCE = 5.0
+CRIT_BALANCE = 1.0
+
+
+def fmt_money(amount: float, currency: str = "USD") -> str:
+    sign = "-" if amount < 0 else ""
+    if currency.upper() == "USD":
+        return f"{sign}${abs(amount):,.2f}"
+    return f"{sign}{abs(amount):,.2f} {currency}"
+
+
+def balance_urgency(amount: float) -> str:
+    if amount <= CRIT_BALANCE:
+        return "critical"
+    if amount <= WARN_BALANCE:
+        return "warn"
+    return "ok"
+
+
+def _balance_dict(r: ProfileResult) -> dict[str, Any] | None:
+    b = r.balance
+    if b is None:
+        return None
+    return {
+        "amount": round(b.amount, 2),
+        "currency": b.currency,
+        "spent_30d": round(b.spent_30d, 2) if b.spent_30d is not None else None,
+    }
 
 
 def _window_dict(w) -> dict[str, Any]:
@@ -69,6 +98,15 @@ def build_payload(
     for r in results:
         rem = primary_remaining(r)
         level = urgency_level(rem, r.status)
+        money = (
+            r.balance
+            if r.balance is not None
+            and rem is None
+            and r.status in (Status.LIVE, Status.STALE)
+            else None
+        )
+        if money is not None:
+            level = balance_urgency(money.amount)
         pw = None
         if r.windows:
             pw = min(r.windows, key=lambda w: w.rem_pct)
@@ -95,10 +133,22 @@ def build_payload(
                 else None
             ),
             "windows": [_window_dict(w) for w in r.windows],
+            "balance": _balance_dict(r),
             "meta": r.meta or {},
         }
         profiles.append(entry)
-        if level in ("critical", "warn") and rem is not None:
+        if money is not None and level in ("critical", "warn"):
+            alerts.append(
+                {
+                    "level": level,
+                    "profile_id": r.id,
+                    "label": r.label,
+                    "remaining_pct": None,
+                    "reset_at": None,
+                    "message": f"{r.label}: {fmt_money(money.amount, money.currency)} left",
+                }
+            )
+        elif level in ("critical", "warn") and rem is not None:
             ended = (r.reason or "") == "подписка закончилась"
             alerts.append(
                 {

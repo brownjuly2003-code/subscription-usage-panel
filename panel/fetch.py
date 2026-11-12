@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
@@ -23,7 +24,17 @@ def fetch_one(
             status=Status.ERROR,
             reason=f"unknown family: {p.family} (register_provider?)",
         )
-    return fetcher(p.id, p.label, p.home, client, timeout)
+    if p.key_file is None:
+        return fetcher(p.id, p.label, p.home, client, timeout)
+    if "key_file" not in inspect.signature(fetcher).parameters:
+        return ProfileResult(
+            id=p.id,
+            family=p.family,
+            label=p.label,
+            status=Status.ERROR,
+            reason=f"key_file is not supported for family {p.family}",
+        )
+    return fetcher(p.id, p.label, p.home, client, timeout, key_file=p.key_file)
 
 
 def fetch_all(cfg: AppConfig) -> tuple[list[ProfileResult], float]:

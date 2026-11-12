@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import List
 
 from panel.models import ProfileResult, Status
+from panel.schema import balance_urgency, fmt_money
 from panel.timefmt import fmt_pct
 
 # Official-ish Grafana palette (classic colors)
@@ -144,11 +145,29 @@ def _sparkline_svg(
 
 def _cards(
     results: List[ProfileResult], show_unavailable_cards: bool = False
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     colors = _family_colors()
-    live, unavailable, offline = [], [], []
+    live, unavailable, offline, balances = [], [], [], []
     for r in results:
         color = colors.get(r.family, G["blue"])
+        if (
+            r.balance is not None
+            and not r.windows
+            and r.status in (Status.LIVE, Status.STALE)
+        ):
+            balances.append(
+                {
+                    "label": r.label,
+                    "family": r.family,
+                    "color": color,
+                    "plan": r.plan or "",
+                    "status": r.status.value,
+                    "amount": r.balance.amount,
+                    "currency": r.balance.currency,
+                    "spent_30d": r.balance.spent_30d,
+                }
+            )
+            continue
         if r.status not in (Status.LIVE, Status.STALE) or not r.windows:
             item = {
                 "label": r.label,
@@ -188,7 +207,8 @@ def _cards(
         )
     live.sort(key=lambda c: c["primary"]["rem_pct"])
     unavailable.sort(key=lambda c: c["label"].lower())
-    return live, unavailable, offline
+    balances.sort(key=lambda c: c["amount"])
+    return live, unavailable, offline, balances
 
 
 def render_dashboard_html(
@@ -250,7 +270,7 @@ def render_dashboard_html(
             f"Page reloads every {poll_label} to re-read dashboard.html from disk."
         )
 
-    live_cards, unavailable_cards, offline = _cards(
+    live_cards, unavailable_cards, offline, balance_cards = _cards(
         results, show_unavailable_cards=show_unavailable_cards
     )
     if payload is None:
@@ -262,6 +282,7 @@ def render_dashboard_html(
     total = len(results)
     families_present = sorted(
         {c["family"] for c in live_cards}
+        | {c["family"] for c in balance_cards}
         | {c["family"] for c in unavailable_cards}
         | {o["family"] for o in offline}
     )
@@ -378,6 +399,45 @@ def render_dashboard_html(
             {spark}
           </div>
           {extras_html}
+        </div>
+      </div>"""
+        )
+
+    # --- Balance panels: prepaid money left (pay-as-you-go), not a % pool ---
+    money_color = {"critical": G["red"], "warn": G["orange"], "ok": G["green"]}
+    for c in balance_cards:
+        col = money_color[balance_urgency(c["amount"])]
+        plan = _esc(c["plan"]) if c["plan"] else ""
+        stale_chip = (
+            ' <span class="panel-stale" title="cached value, not a live reading">last known</span>'
+            if c.get("status") == "stale"
+            else ""
+        )
+        if c.get("spent_30d") is not None:
+            spent_line = (
+                f"spent 30 days <b>{_esc(fmt_money(c['spent_30d'], c['currency']))}</b>"
+            )
+        else:
+            spent_line = "spent 30 days <b>—</b>"
+        stat_panels.append(
+            f"""
+      <div class="panel panel-stat" data-family="{_esc(c["family"])}" data-label="{_esc(c["label"]).lower()}" data-kind="balance">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span class="series-dot" style="background:{c["color"]}"></span>
+            <span class="panel-title-text">{_esc(c["label"])}</span>
+            {f'<span class="panel-desc">{plan}</span>' if plan else ""}
+          </div>
+          <div class="panel-menu" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+        <div class="panel-content stat-content">
+          <div class="stat-value-wrap">
+            <div class="stat-value" style="color:{col}">{_esc(fmt_money(c["amount"], c["currency"]))}</div>
+            <div class="stat-title">balance left{stale_chip}</div>
+            <div class="stat-reset">{spent_line}</div>
+          </div>
         </div>
       </div>"""
         )

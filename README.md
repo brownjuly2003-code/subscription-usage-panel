@@ -87,9 +87,17 @@ shows the failure reason without presenting cached percentages as current data.
 
 Rules live in **`panel/catalog.yaml`** (extend without rewriting core code):
 
-- **Implemented fetchers:** `claude`, `codex`, `grok`, `gemini`, `kimi`, `openrouter`, `openai`, `github`, `zai`
+- **Implemented fetchers:** `claude`, `codex`, `grok`, `gemini`, `kimi`, `openrouter`, `openai`, `github`, `zai`, `opencode`
 - **Discoverable stubs** (home/env detected, remaining when you add a fetcher or token works later):  
-  `cursor`, `copilot`, `amp`, `opencode`, `minimax`, `windsurf`, `continue`, `aider`, `litellm`, `anthropic_api`
+  `cursor`, `copilot`, `amp`, `minimax`, `windsurf`, `continue`, `aider`, `litellm`, `anthropic_api`
+
+`opencode` reports the OpenCode Zen **prepaid balance** in money (plus 30-day
+spend), not a percentage: the card turns orange at ≤ $5 and red at ≤ $1. The
+key comes from the profile's optional `key_file`, else `OPENCODE_API_KEY`, else
+the CLI `auth.json` in the profile home.
+
+`claude` takes the plan label from the live OAuth profile (e.g. `Ultra · 20x`);
+`.credentials.json` keeps the tier from sign-in time and is only a fallback.
 
 A user with no local Cursor/Gemini today still benefits: **tomorrow’s homes appear automatically**.
 

@@ -146,3 +146,93 @@ def test_claude_without_oauth_does_not_present_cached_limits_as_current(
     assert "claude auth login" in result.reason
     client.get.assert_not_called()
     client.post.assert_not_called()
+
+
+def test_claude_plan_format() -> None:
+    fmt = claude_mod._format_plan
+    assert fmt("Ultra plan", "max", "default_claude_max_20x") == "Ultra · 20x"
+    assert fmt("Max 20x", "max", "default_claude_max_20x") == "Max 20x"
+    assert fmt("", "max", "default_claude_max_5x") == "max 5x"
+    assert fmt("", "", "default_claude_max_20x") == "max 20x"
+    assert fmt("", "pro", "default_claude_pro") == "pro"
+
+
+def _claude_home(tmp_path: Path, tier: str) -> Path:
+    home = tmp_path / ".claude"
+    home.mkdir()
+    creds = {
+        "claudeAiOauth": {
+            "accessToken": "tok",
+            "refreshToken": "rt",
+            "expiresAt": int((time.time() + 3600) * 1000),
+            "subscriptionType": "max",
+            "rateLimitTier": tier,
+        }
+    }
+    (home / ".credentials.json").write_text(json.dumps(creds), encoding="utf-8")
+    return home
+
+
+def test_claude_live_profile_overrides_stale_sign_in_tier(tmp_path: Path) -> None:
+    home = _claude_home(tmp_path, "default_claude_max_5x")
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    usage = {
+        "five_hour": {"utilization": 9.0, "resets_at": future},
+        "seven_day": {"utilization": 7.0, "resets_at": future},
+    }
+    profile = {
+        "organization": {
+            "organization_type": "claude_max",
+            "rate_limit_tier": "default_claude_max_20x",
+            "plan_display_label": "Ultra plan",
+        }
+    }
+    client = MagicMock(spec=httpx.Client)
+
+    def get(url, **kwargs):
+        r = MagicMock()
+        r.status_code = 200
+        r.json.return_value = profile if url.endswith("/profile") else usage
+        return r
+
+    client.get.side_effect = get
+    result = claude_mod.fetch_claude("c", "CLAUDE/personal", home, client, 5.0)
+    assert result.status == Status.LIVE
+    assert result.plan == "Ultra · 20x"
+    assert result.meta["plan_source"] == "oauth/profile"
+
+
+def test_claude_offline_plan_prefers_claude_json_over_credentials(
+    tmp_path: Path,
+) -> None:
+    home = _claude_home(tmp_path, "default_claude_max_5x")
+    assert claude_mod._plan(home) == "max 5x"
+    account = {
+        "oauthAccount": {
+            "organizationType": "claude_max",
+            "organizationRateLimitTier": "default_claude_max_20x",
+        }
+    }
+    (home / ".claude.json").write_text(json.dumps(account), encoding="utf-8")
+    assert claude_mod._plan(home) == "max 20x"
+
+
+def test_claude_profile_failure_keeps_offline_plan(tmp_path: Path) -> None:
+    home = _claude_home(tmp_path, "default_claude_max_5x")
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    client = MagicMock(spec=httpx.Client)
+
+    def get(url, **kwargs):
+        r = MagicMock()
+        if url.endswith("/profile"):
+            r.status_code = 500
+            return r
+        r.status_code = 200
+        r.json.return_value = {"five_hour": {"utilization": 1, "resets_at": future}}
+        return r
+
+    client.get.side_effect = get
+    result = claude_mod.fetch_claude("c", "C", home, client, 5.0)
+    assert result.status == Status.LIVE
+    assert result.plan == "max 5x"
+    assert "plan_source" not in result.meta

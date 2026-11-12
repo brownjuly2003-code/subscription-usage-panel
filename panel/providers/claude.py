@@ -6,6 +6,7 @@ The panel must do the same so idle homes do not look dead until next `claude`.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -20,6 +21,7 @@ from panel.timefmt import format_reset_at_iso, format_reset_iso, parse_pct
 OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 REFRESH_SKEW_S = 120.0
+PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 
 
 def _creds_path(home: Path) -> Path:
@@ -77,18 +79,78 @@ def _expires_at_s(home: Path) -> Optional[float]:
     return exp_i
 
 
+def _format_plan(display_label: str, sub: str, tier: str) -> str:
+    """Vendor label first ("Ultra plan" + max_20x -> "Ultra · 20x"), else "max 20x"."""
+    m = re.search(r"(\d+)x\b", tier or "")
+    mult = f"{m.group(1)}x" if m else ""
+    label = (display_label or "").strip()
+    if label.lower().endswith(" plan"):
+        label = label[:-5].strip()
+    if label:
+        return f"{label} · {mult}" if mult and mult not in label.lower() else label
+    sub = (sub or "").strip()
+    if mult:
+        return f"{sub} {mult}" if sub else f"max {mult}"
+    return sub
+
+
 def _plan(home: Path) -> str:
+    """Offline plan guess.
+
+    ``.credentials.json`` keeps the tier from sign-in time and goes stale after a
+    plan change; Claude Code re-fetches the profile into ``<home>/.claude.json``,
+    so that copy wins when present.
+    """
+    try:
+        p = home / ".claude.json"
+        if p.is_file():
+            acc = json.loads(p.read_text(encoding="utf-8")).get("oauthAccount") or {}
+            tier = str(acc.get("organizationRateLimitTier") or "")
+            if tier:
+                org = str(acc.get("organizationType") or "")
+                return _format_plan("", org.removeprefix("claude_"), tier)
+    except Exception:
+        pass
     try:
         o = _load_oauth(home)
-        sub = str(o.get("subscriptionType") or "")
-        tier = str(o.get("rateLimitTier") or "")
-        if "5x" in tier:
-            return f"{sub} 5x" if sub else "max 5x"
-        if "20x" in tier:
-            return f"{sub} 20x" if sub else "max 20x"
-        return sub
+        return _format_plan(
+            "", str(o.get("subscriptionType") or ""), str(o.get("rateLimitTier") or "")
+        )
     except Exception:
         return ""
+
+
+def _live_plan(client: httpx.Client, token: str, timeout: float) -> str:
+    """Current plan from the OAuth profile endpoint ("" when unavailable)."""
+    try:
+        resp = client.get(
+            PROFILE_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "Accept": "application/json",
+                "User-Agent": "claude-code/2.1.4",
+            },
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return ""
+        data = resp.json()
+    except Exception:
+        return ""
+    org = data.get("organization") if isinstance(data, dict) else None
+    if not isinstance(org, dict):
+        return ""
+
+    def s(key: str) -> str:
+        v = org.get(key)
+        return v if isinstance(v, str) else ""
+
+    return _format_plan(
+        s("plan_display_label"),
+        s("organization_type").removeprefix("claude_"),
+        s("rate_limit_tier"),
+    )
 
 
 def _refresh_oauth(
@@ -363,5 +425,9 @@ def fetch_claude(
     r.status = Status.LIVE
     r.windows = wins
     r.meta["source"] = "subscription oauth/usage"
+    live_plan = _live_plan(client, tok, timeout)
+    if live_plan:
+        r.plan = live_plan
+        r.meta["plan_source"] = "oauth/profile"
     r.latency_ms = (time.perf_counter() - t0) * 1000
     return r

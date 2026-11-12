@@ -21,6 +21,9 @@ class ProfileCfg:
     label: str
     home: Path
     enabled: bool = True
+    # Optional API key file for key-based providers (e.g. opencode) whose live
+    # key is not stored in the CLI home.
+    key_file: Path | None = None
 
 
 @dataclass
@@ -85,6 +88,9 @@ def load_config(path: Path | None = None) -> AppConfig:
                 label=str(p.get("label") or p["id"]),
                 home=expand_home(str(p["home"])),
                 enabled=bool(p.get("enabled", True)),
+                key_file=(
+                    expand_home(str(p["key_file"])) if p.get("key_file") else None
+                ),
             )
         )
 

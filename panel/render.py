@@ -5,6 +5,7 @@ from typing import Iterable, List
 
 from panel.config import AppConfig
 from panel.models import ProfileResult, Status, Window
+from panel.schema import balance_urgency, fmt_money
 from panel.timefmt import fmt_pct
 
 RST = "\033[0m"
@@ -124,6 +125,17 @@ def render_frame(
                 tail.append(r.plan)
             if r.status == Status.STALE and r.reason:
                 tail.append(r.reason)
+            t = f" {DIM}{' · '.join(tail)}{RST}" if tail else ""
+            lines.append(f"{name} {body}{t}")
+        elif r.balance is not None and r.status in (Status.LIVE, Status.STALE):
+            b = r.balance
+            clr = {"critical": ERR, "warn": GOLD}.get(balance_urgency(b.amount), SAGE)
+            body = f"bal {clr}{fmt_money(b.amount, b.currency)}{RST}"
+            tail = []
+            if b.spent_30d is not None:
+                tail.append(f"30d {fmt_money(b.spent_30d, b.currency)}")
+            if r.plan:
+                tail.append(r.plan)
             t = f" {DIM}{' · '.join(tail)}{RST}" if tail else ""
             lines.append(f"{name} {body}{t}")
         else:

@@ -29,6 +29,20 @@ class Window:
 
 
 @dataclass
+class Balance:
+    """Prepaid money left on a pay-as-you-go account (not a percentage pool)."""
+
+    amount: float  # remaining balance in *currency* units; may be negative
+    currency: str = "USD"
+    spent_30d: Optional[float] = None  # rolling 30-day spend, when the API has it
+
+    def __post_init__(self) -> None:
+        self.amount = float(self.amount)
+        if self.spent_30d is not None:
+            self.spent_30d = float(self.spent_30d)
+
+
+@dataclass
 class ProfileResult:
     id: str
     family: str  # claude | codex | grok
@@ -40,6 +54,7 @@ class ProfileResult:
     email: str = ""
     latency_ms: float = 0.0
     meta: dict[str, Any] = field(default_factory=dict)
+    balance: Optional[Balance] = None
 
     @property
     def sort_key(self) -> tuple:
